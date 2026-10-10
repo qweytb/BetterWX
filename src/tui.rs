@@ -400,7 +400,7 @@ impl Screen {
             sleep(4 + index as u32 * 5);
             execute!(self.output, MoveTo(0, row), Clear(ClearType::CurrentLine))?;
         }
-        let banner = "  BetterWX  ";
+        let banner = format!("  BetterWX v{}  ", env!("CARGO_PKG_VERSION"));
         execute!(self.output, MoveTo(1, 2), SetAttribute(Attribute::Reverse))?;
         let mut written = 0;
         for tick in 0..39 {
@@ -411,7 +411,7 @@ impl Screen {
             written = visible;
             sleep(tick as u32 % 2);
         }
-        sleep(500);
+        sleep(250);
         execute!(
             self.output,
             SetAttribute(Attribute::Reset),
