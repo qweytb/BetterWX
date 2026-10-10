@@ -1,10 +1,12 @@
 mod feature;
+mod image;
 mod install;
 #[cfg(windows)]
 mod process;
 mod progress;
 mod store;
 mod tui;
+mod uia;
 
 use std::{collections::BTreeSet, env, error::Error, path::PathBuf, process::ExitCode};
 

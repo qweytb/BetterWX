@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, ops::Range};
 
-use crate::{Result, progress::Progress};
+use crate::{Result, progress::Progress, uia};
 
 pub struct Feature {
     pub id: &'static str,
@@ -19,7 +19,7 @@ pub struct Prepared {
     pub edits: std::result::Result<Vec<Edit>, String>,
 }
 
-pub const FEATURES: &[Feature] = &[];
+pub const FEATURES: &[Feature] = &[uia::FEATURE];
 
 pub fn find(id: &str) -> Result<&'static Feature> {
     FEATURES
