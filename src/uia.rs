@@ -4,25 +4,40 @@ use iced_x86::{Code, Decoder, DecoderOptions, Instruction, Register};
 
 use crate::{
     Result,
-    feature::{Edit, Edits, Feature},
-    image::Image,
+    feature::{Edit, Feature, Target},
+    image::{Image, References, Symbols},
     progress::Progress,
-    store::Store,
 };
+
+const KEY: &str = "accessibility_enable_scheme\0";
 
 pub const FEATURE: Feature = Feature {
     id: "uia",
     name: "开放无障碍访问",
     description: "开放微信的原生无障碍控件查询",
-    files: &[],
-    scan,
+    targets: &[Target {
+        file: None,
+        find,
+        scan,
+    }],
 };
 
-fn scan(store: &mut Store, progress: &Progress) -> Result<Edits> {
-    let target = store.target.clone();
-    let file = store.load(&target, progress)?;
-    let image = Image::parse(&file.original, progress)?;
-    let offset = locate(&image, progress)?;
+fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
+    let keys = image.find(KEY.as_bytes(), progress)?;
+    if keys.is_empty() {
+        return Err("找不到无障碍配置键".into());
+    }
+    Ok(Symbols::from([(KEY.to_owned(), keys)]))
+}
+
+fn scan(
+    image: &Image<'_>,
+    symbols: &Symbols,
+    references: &References,
+    progress: &Progress,
+) -> Result<Vec<Edit>> {
+    let address = locate(image, symbols, references, progress)?;
+    let offset = image.offset(address)?;
     let step = progress.activity(format!("准备补丁：{}", FEATURE.name));
     let edits = vec![Edit {
         range: offset..offset + 1,
@@ -30,21 +45,24 @@ fn scan(store: &mut Store, progress: &Progress) -> Result<Edits> {
     }];
     step.finish(format!(
         "文件位置 {offset:#x}：{:02X} → C3",
-        file.original[offset]
+        image.data(address, 1)?[0]
     ));
-    Ok(Edits::from([(target, edits)]))
+    Ok(edits)
 }
 
-fn locate(image: &Image<'_>, progress: &Progress) -> Result<usize> {
-    let keys = image.find(b"accessibility_enable_scheme\0", progress)?;
-    if keys.is_empty() {
-        return Err("找不到无障碍配置键".into());
-    }
-
-    let references = image.references(&keys, progress)?;
+fn locate(
+    image: &Image<'_>,
+    symbols: &Symbols,
+    references: &References,
+    progress: &Progress,
+) -> Result<u64> {
     let mut setters = BTreeSet::new();
     let mut calls = BTreeSet::new();
-    for function in references.values().flatten() {
+    for function in symbols[KEY]
+        .iter()
+        .filter_map(|address| references.get(address))
+        .flatten()
+    {
         progress.check()?;
         let bytes = image.data(function.start, (function.end - function.start) as usize)?;
         let mut decoder = Decoder::with_ip(64, bytes, function.start, DecoderOptions::NONE);
@@ -86,5 +104,5 @@ fn locate(image: &Image<'_>, progress: &Progress) -> Result<usize> {
         setter - image.base(),
         flag - image.base()
     ));
-    image.offset(setter)
+    Ok(setter)
 }

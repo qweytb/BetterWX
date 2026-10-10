@@ -6,6 +6,7 @@ use std::{
 
 use crate::{
     Result,
+    image::{Image, References, Symbols},
     progress::Progress,
     store::{Content, Store},
     uia, updates,
@@ -17,8 +18,22 @@ pub struct Feature {
     pub id: &'static str,
     pub name: &'static str,
     pub description: &'static str,
-    pub files: &'static [&'static str],
-    pub scan: fn(&mut Store, &Progress) -> Result<Edits>,
+    pub targets: &'static [Target],
+}
+
+pub struct Target {
+    pub file: Option<&'static str>,
+    pub find: fn(&Image<'_>, &Progress) -> Result<Symbols>,
+    pub scan: fn(&Image<'_>, &Symbols, &References, &Progress) -> Result<Vec<Edit>>,
+}
+
+impl Target {
+    fn path(&self, primary: &Path) -> Result<PathBuf> {
+        match self.file {
+            Some(file) => Ok(primary.parent().ok_or("目标文件缺少父目录")?.join(file)),
+            None => Ok(primary.to_owned()),
+        }
+    }
 }
 
 pub struct Edit {
@@ -90,12 +105,12 @@ impl Prepared {
 pub const FEATURES: &[Feature] = &[uia::FEATURE, updates::FEATURE];
 
 pub fn targets(target: &Path) -> Result<Vec<PathBuf>> {
-    let directory = target.parent().ok_or("目标文件缺少父目录")?;
     Ok(FEATURES
         .iter()
-        .flat_map(|feature| feature.files)
-        .map(|file| directory.join(file))
-        .collect::<BTreeSet<_>>()
+        .flat_map(|feature| feature.targets)
+        .filter(|target| target.file.is_some())
+        .map(|entry| entry.path(target))
+        .collect::<Result<BTreeSet<_>>>()?
         .into_iter()
         .collect())
 }
@@ -108,12 +123,79 @@ pub fn find(id: &str) -> Result<&'static Feature> {
 }
 
 pub fn scan(store: &mut Store, progress: &Progress) -> Result<Vec<Prepared>> {
-    let mut prepared = Vec::new();
-    for feature in FEATURES {
+    let mut prepared: Vec<_> = FEATURES
+        .iter()
+        .map(|feature| Prepared {
+            feature,
+            edits: Ok(Edits::new()),
+        })
+        .collect();
+    let mut files: BTreeMap<PathBuf, Vec<(usize, &Target)>> = BTreeMap::new();
+    for (index, feature) in FEATURES.iter().enumerate() {
+        for target in feature.targets {
+            progress.check()?;
+            let path = target.path(&store.target)?;
+            match store.load(&path, progress) {
+                Ok(file) => files
+                    .entry(file.target.clone())
+                    .or_default()
+                    .push((index, target)),
+                Err(error) => {
+                    prepared[index].edits = Err(format!("无法读取 {}：{error}", path.display()))
+                }
+            }
+        }
+    }
+    for (path, targets) in files {
         progress.check()?;
-        let edits = (feature.scan)(store, progress).map_err(|error| error.to_string());
-        progress.check()?;
-        prepared.push(Prepared { feature, edits });
+        let image = match Image::parse(&store.files[&path].original) {
+            Ok(image) => image,
+            Err(error) => {
+                for (index, _) in targets {
+                    prepared[index].edits = Err(format!("{}：{error}", path.display()));
+                }
+                continue;
+            }
+        };
+        let mut found = Vec::new();
+        for (index, target) in targets {
+            if prepared[index].edits.is_err() {
+                continue;
+            }
+            progress.check()?;
+            match (target.find)(&image, progress) {
+                Ok(symbols) => found.push((index, target, symbols)),
+                Err(error) => prepared[index].edits = Err(error.to_string()),
+            }
+        }
+        let addresses: Vec<_> = found
+            .iter()
+            .flat_map(|(_, _, symbols)| symbols.values().flatten())
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let references = match image.references(&addresses, &name, progress) {
+            Ok(references) => references,
+            Err(error) => {
+                for (index, _, _) in found {
+                    prepared[index].edits = Err(error.to_string());
+                }
+                continue;
+            }
+        };
+        for (index, target, symbols) in found {
+            progress.check()?;
+            match (target.scan)(&image, &symbols, &references, progress) {
+                Ok(edits) => {
+                    if let Ok(changes) = &mut prepared[index].edits {
+                        changes.entry(path.clone()).or_default().extend(edits);
+                    }
+                }
+                Err(error) => prepared[index].edits = Err(error.to_string()),
+            }
+        }
     }
     Ok(prepared)
 }

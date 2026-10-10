@@ -13,26 +13,19 @@ use crate::{
     progress::{FRAME, Progress},
 };
 
+pub type Symbols = BTreeMap<String, Vec<u64>>;
+pub type References = BTreeMap<u64, Vec<Range<u64>>>;
+
 pub struct Image<'a> {
     file: PeFile64<'a>,
 }
 
 impl<'a> Image<'a> {
-    pub fn parse(data: &'a [u8], progress: &Progress) -> Result<Self> {
-        let step = progress.activity("解析 PE 映像");
+    pub fn parse(data: &'a [u8]) -> Result<Self> {
         let file = PeFile64::parse(data)?;
         if file.architecture() != object::Architecture::X86_64 {
             return Err("需要 Windows x64 PE 文件".into());
         }
-        let mut names = Vec::new();
-        for section in file.sections() {
-            names.push(section.name()?);
-        }
-        step.finish(format!(
-            "AMD64 / PE32+，{} 个节：{}",
-            names.len(),
-            names.join("、")
-        ));
         Ok(Self { file })
     }
 
@@ -104,12 +97,20 @@ impl<'a> Image<'a> {
     pub fn references(
         &self,
         addresses: &[u64],
+        name: &str,
         progress: &Progress,
-    ) -> Result<BTreeMap<u64, Vec<Range<u64>>>> {
-        let functions = self.functions(progress)?;
+    ) -> Result<References> {
+        let mut references = References::new();
+        if addresses.is_empty() {
+            return Ok(references);
+        }
+        let functions = self.functions()?;
         let targets: BTreeSet<_> = addresses.iter().copied().collect();
-        let step = progress.start("解码 x64 指令与引用", functions.len() as u64, "个函数");
-        let mut references: BTreeMap<u64, Vec<Range<u64>>> = BTreeMap::new();
+        let step = progress.start(
+            format!("分析代码引用：{name}"),
+            functions.len() as u64,
+            "个函数",
+        );
         let mut sample = Instant::now();
         let mut formatter = FastFormatter::new();
         for (index, function) in functions.into_iter().enumerate() {
@@ -151,25 +152,21 @@ impl<'a> Image<'a> {
         Ok(references)
     }
 
-    pub fn functions(&self, progress: &Progress) -> Result<Vec<Range<u64>>> {
+    fn functions(&self) -> Result<Vec<Range<u64>>> {
         let section = self
             .file
             .section_by_name(".pdata")
             .ok_or("找不到异常展开表")?;
         let data = section.data()?;
         let entries = data.as_chunks::<12>().0;
-        let step = progress.start("解析异常展开表", entries.len() as u64, "条");
         let mut functions = Vec::new();
-        for (index, entry) in entries.iter().enumerate() {
-            progress.check()?;
+        for entry in entries {
             let start = u32::from_le_bytes(entry[..4].try_into()?) as u64;
             let end = u32::from_le_bytes(entry[4..8].try_into()?) as u64;
             if start < end {
                 functions.push(self.base() + start..self.base() + end);
             }
-            step.set(index as u64 + 1);
         }
-        step.finish(format!("取得 {} 个函数范围", functions.len()));
         Ok(functions)
     }
 }

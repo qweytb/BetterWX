@@ -1,6 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{Result, image::Image, progress::Progress};
+use crate::{
+    Result,
+    image::{Image, Symbols},
+    progress::Progress,
+};
 
 fn decode(data: &[u8]) -> Option<Vec<u8>> {
     data.as_chunks::<2>()
@@ -14,7 +18,7 @@ fn decode(data: &[u8]) -> Option<Vec<u8>> {
         .collect()
 }
 
-pub fn find(image: &Image<'_>, names: &[&str], progress: &Progress) -> Result<Vec<Vec<u64>>> {
+pub fn find(image: &Image<'_>, names: &[&str], progress: &Progress) -> Result<Symbols> {
     let sections = image.sections()?;
     let total = sections.iter().map(|(_, data)| data.len() as u64).sum();
     let step = progress.start("解析日志字符串", total, "字节");
@@ -86,7 +90,7 @@ pub fn find(image: &Image<'_>, names: &[&str], progress: &Progress) -> Result<Ve
                 .zip(stream)
                 .map(|(left, right)| left ^ right)
                 .collect();
-            records[&encoded].clone()
+            ((*name).to_owned(), records[&encoded].clone())
         })
         .collect();
     step.finish(format!("找到 {} 个日志符号", names.len()));

@@ -2,21 +2,30 @@ use std::collections::BTreeSet;
 
 use crate::{
     Result,
-    feature::{Edit, Edits, Feature},
-    image::Image,
+    feature::{Edit, Feature, Target},
+    image::{Image, References, Symbols},
     progress::Progress,
-    store::Store,
     xlog,
 };
 
-const LAUNCHER: &str = "../Weixin.exe";
+const KEY: &str = "update.data\0";
 
 pub const FEATURE: Feature = Feature {
     id: "no-updates",
     name: "关闭更新",
     description: "关闭微信内置版本更新",
-    files: &[LAUNCHER],
-    scan,
+    targets: &[
+        Target {
+            file: None,
+            find,
+            scan,
+        },
+        Target {
+            file: Some("../Weixin.exe"),
+            find: find_launcher,
+            scan: scan_launcher,
+        },
+    ],
 };
 
 const FUNCTIONS: &[(&str, &[u8])] = &[
@@ -53,24 +62,22 @@ fn edit(image: &Image<'_>, address: u64, bytes: &[u8]) -> Result<Edit> {
     })
 }
 
-fn scan(store: &mut Store, progress: &Progress) -> Result<Edits> {
-    let target = store.target.clone();
-    let launcher = target.parent().ok_or("目标文件缺少父目录")?.join(LAUNCHER);
-    let launcher = store
-        .load(&launcher, progress)
-        .map_err(|error| format!("无法读取 {}：{error}", launcher.display()))?
-        .target
-        .clone();
-    let image = Image::parse(&store.files[&target].original, progress)?;
+fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
     let names: Vec<_> = FUNCTIONS.iter().map(|(name, _)| *name).collect();
-    let symbols = xlog::find(&image, &names, progress)?;
-    let addresses: Vec<_> = symbols.iter().flatten().copied().collect();
-    let references = image.references(&addresses, progress)?;
+    xlog::find(image, &names, progress)
+}
+
+fn scan(
+    image: &Image<'_>,
+    symbols: &Symbols,
+    references: &References,
+    progress: &Progress,
+) -> Result<Vec<Edit>> {
     let step = progress.start("定位版本更新函数", FUNCTIONS.len() as u64, "个函数");
     let mut edits = Vec::new();
-    for (index, ((name, bytes), symbols)) in FUNCTIONS.iter().zip(symbols).enumerate() {
+    for (index, (name, bytes)) in FUNCTIONS.iter().enumerate() {
         progress.check()?;
-        let functions: BTreeSet<_> = symbols
+        let functions: BTreeSet<_> = symbols[*name]
             .iter()
             .filter_map(|address| references.get(address))
             .flatten()
@@ -80,16 +87,29 @@ fn scan(store: &mut Store, progress: &Progress) -> Result<Edits> {
             return Err(format!("无法唯一定位 {name}").into());
         };
         step.detail(format!("{name}\nRVA {:#x}", address - image.base()));
-        edits.push(edit(&image, address, bytes)?);
+        edits.push(edit(image, address, bytes)?);
         step.set(index as u64 + 1);
     }
     step.finish(format!("取得 {} 个函数入口", edits.len()));
+    Ok(edits)
+}
 
-    let image = Image::parse(&store.files[&launcher].original, progress)?;
-    let addresses = image.find(b"update.data\0", progress)?;
-    let references = image.references(&addresses, progress)?;
-    let functions: BTreeSet<_> = references
-        .values()
+fn find_launcher(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
+    Ok(Symbols::from([(
+        KEY.to_owned(),
+        image.find(KEY.as_bytes(), progress)?,
+    )]))
+}
+
+fn scan_launcher(
+    image: &Image<'_>,
+    symbols: &Symbols,
+    references: &References,
+    progress: &Progress,
+) -> Result<Vec<Edit>> {
+    let functions: BTreeSet<_> = symbols[KEY]
+        .iter()
+        .filter_map(|address| references.get(address))
         .flatten()
         .map(|function| function.start)
         .collect();
@@ -97,7 +117,7 @@ fn scan(store: &mut Store, progress: &Progress) -> Result<Edits> {
         return Err("无法唯一定位启动器的版本更新入口".into());
     };
     let step = progress.activity("准备启动器补丁");
-    let loader = edit(&image, address, &[0x31, 0xc0, 0xc3])?;
+    let loader = edit(image, address, &[0x31, 0xc0, 0xc3])?;
     step.finish(format!("更新入口 RVA {:#x}", address - image.base()));
-    Ok(Edits::from([(target, edits), (launcher, vec![loader])]))
+    Ok(vec![loader])
 }
