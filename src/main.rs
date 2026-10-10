@@ -37,7 +37,7 @@ fn run() -> Result<()> {
     if command == "--help" || command == "-h" {
         println!("{HELP}");
         for feature in feature::FEATURES {
-            println!("{}：{}", feature.id, feature.description);
+            println!("{}：{}", feature.id, feature.name);
         }
         return Ok(());
     }

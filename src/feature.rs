@@ -159,7 +159,12 @@ pub fn inspect(store: &mut Store, prepared: &[Prepared], progress: &Progress) ->
         } else if enabled.is_empty() {
             "原始状态".to_owned()
         } else {
-            enabled.iter().cloned().collect::<Vec<_>>().join("、")
+            prepared
+                .iter()
+                .filter(|patch| enabled.contains(patch.feature.id))
+                .map(|patch| patch.feature.name)
+                .collect::<Vec<_>>()
+                .join("、")
         });
         file.enabled = enabled;
     }

@@ -13,7 +13,7 @@ use crate::{
 
 pub const FEATURE: Feature = Feature {
     id: "uia",
-    name: "UI 自动化",
+    name: "开放无障碍访问",
     description: "开放微信的原生无障碍控件查询",
     files: &[],
     scan,
@@ -24,7 +24,7 @@ fn scan(store: &mut Store, progress: &Progress) -> Result<Edits> {
     let file = store.load(&target, progress)?;
     let image = Image::parse(&file.original, progress)?;
     let offset = locate(&image, progress)?;
-    let step = progress.activity("准备 UI 自动化补丁");
+    let step = progress.activity(format!("准备补丁：{}", FEATURE.name));
     let edits = vec![Edit {
         range: offset..offset + 1,
         bytes: vec![0xc3],
