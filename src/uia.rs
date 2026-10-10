@@ -1,13 +1,12 @@
 use std::collections::BTreeSet;
-use std::time::Instant;
 
-use iced_x86::{Code, Decoder, DecoderOptions, FastFormatter, Instruction, Register};
+use iced_x86::{Code, Decoder, DecoderOptions, Instruction, Register};
 
 use crate::{
     Result,
     feature::{Edit, Edits, Feature},
     image::Image,
-    progress::{FRAME, Progress},
+    progress::Progress,
     store::Store,
 };
 
@@ -42,48 +41,24 @@ fn locate(image: &Image<'_>, progress: &Progress) -> Result<usize> {
         return Err("找不到无障碍配置键".into());
     }
 
-    let functions = image.functions(progress)?;
-    let step = progress.start("解码 x64 指令与配置引用", functions.len() as u64, "个函数");
+    let references = image.references(&keys, progress)?;
     let mut setters = BTreeSet::new();
     let mut calls = BTreeSet::new();
-    let mut sample = Instant::now();
-    let mut formatter = FastFormatter::new();
-    for (index, function) in functions.iter().enumerate() {
+    for function in references.values().flatten() {
         progress.check()?;
         let bytes = image.data(function.start, (function.end - function.start) as usize)?;
         let mut decoder = Decoder::with_ip(64, bytes, function.start, DecoderOptions::NONE);
         let mut instruction = Instruction::default();
-        if sample.elapsed() >= FRAME {
-            let first = decoder.decode();
-            let mut text = String::new();
-            formatter.format(&first, &mut text);
-            step.detail(format!(
-                "函数 RVA {:#x}\n{text}",
-                function.start - image.base()
-            ));
-            decoder.set_position(0)?;
-            decoder.set_ip(function.start);
-            sample = Instant::now();
-        }
-        let mut targets = BTreeSet::new();
-        let mut references_key = false;
         while decoder.can_decode() {
             decoder.decode_out(&mut instruction);
-            references_key |= instruction.is_ip_rel_memory_operand()
-                && keys.contains(&instruction.ip_rel_memory_address());
             if matches!(
                 instruction.code(),
                 Code::Call_rel32_64 | Code::Jmp_rel32_64 | Code::Jmp_rel8_64
             ) {
-                targets.insert(instruction.near_branch_target());
+                calls.insert(instruction.near_branch_target());
             }
         }
-        if references_key {
-            calls.extend(targets);
-        }
-        step.set(index as u64 + 1);
     }
-    step.finish(format!("找到 {} 个待分析的目标函数", calls.len()));
     let step = progress.activity("定位无障碍开关");
     for target in calls {
         progress.check()?;

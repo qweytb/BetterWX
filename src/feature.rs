@@ -8,7 +8,7 @@ use crate::{
     Result,
     progress::Progress,
     store::{Content, Store},
-    uia,
+    uia, updates,
 };
 
 pub type Edits = BTreeMap<PathBuf, Vec<Edit>>;
@@ -87,7 +87,7 @@ impl Prepared {
     }
 }
 
-pub const FEATURES: &[Feature] = &[uia::FEATURE];
+pub const FEATURES: &[Feature] = &[uia::FEATURE, updates::FEATURE];
 
 pub fn targets(target: &Path) -> Result<Vec<PathBuf>> {
     let directory = target.parent().ok_or("目标文件缺少父目录")?;

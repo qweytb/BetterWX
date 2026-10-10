@@ -7,6 +7,8 @@ mod progress;
 mod store;
 mod tui;
 mod uia;
+mod updates;
+mod xlog;
 
 use std::{env, error::Error, path::PathBuf, process::ExitCode};
 

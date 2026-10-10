@@ -1,9 +1,17 @@
-use std::ops::Range;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Range,
+    time::Instant,
+};
 
+use iced_x86::{Decoder, DecoderOptions, FastFormatter, Instruction};
 use object::read::pe::PeFile64;
 use object::read::{Object, ObjectSection};
 
-use crate::{Result, progress::Progress};
+use crate::{
+    Result,
+    progress::{FRAME, Progress},
+};
 
 pub struct Image<'a> {
     file: PeFile64<'a>,
@@ -30,6 +38,13 @@ impl<'a> Image<'a> {
 
     pub fn base(&self) -> u64 {
         self.file.relative_address_base()
+    }
+
+    pub fn sections(&self) -> Result<Vec<(u64, &'a [u8])>> {
+        self.file
+            .sections()
+            .map(|section| Ok((section.address(), section.data()?)))
+            .collect()
     }
 
     pub fn data(&self, address: u64, size: usize) -> Result<&'a [u8]> {
@@ -59,10 +74,7 @@ impl<'a> Image<'a> {
     }
 
     pub fn find(&self, value: &[u8], progress: &Progress) -> Result<Vec<u64>> {
-        let mut sections = Vec::new();
-        for section in self.file.sections() {
-            sections.push((section.address(), section.data()?));
-        }
+        let sections = self.sections()?;
         let step = progress.activity("查找配置字符串");
         let target = String::from_utf8_lossy(value.strip_suffix(&[0]).unwrap_or(value));
         step.detail(target.to_string());
@@ -87,6 +99,56 @@ impl<'a> Image<'a> {
             )
         });
         Ok(addresses)
+    }
+
+    pub fn references(
+        &self,
+        addresses: &[u64],
+        progress: &Progress,
+    ) -> Result<BTreeMap<u64, Vec<Range<u64>>>> {
+        let functions = self.functions(progress)?;
+        let targets: BTreeSet<_> = addresses.iter().copied().collect();
+        let step = progress.start("解码 x64 指令与引用", functions.len() as u64, "个函数");
+        let mut references: BTreeMap<u64, Vec<Range<u64>>> = BTreeMap::new();
+        let mut sample = Instant::now();
+        let mut formatter = FastFormatter::new();
+        for (index, function) in functions.into_iter().enumerate() {
+            progress.check()?;
+            let bytes = self.data(function.start, (function.end - function.start) as usize)?;
+            let mut decoder = Decoder::with_ip(64, bytes, function.start, DecoderOptions::NONE);
+            let mut instruction = Instruction::default();
+            if sample.elapsed() >= FRAME {
+                let first = decoder.decode();
+                let mut text = String::new();
+                formatter.format(&first, &mut text);
+                step.detail(format!(
+                    "函数 RVA {:#x}\n{text}",
+                    function.start - self.base()
+                ));
+                decoder.set_position(0)?;
+                decoder.set_ip(function.start);
+                sample = Instant::now();
+            }
+            let mut found = BTreeSet::new();
+            while decoder.can_decode() {
+                decoder.decode_out(&mut instruction);
+                if instruction.is_ip_rel_memory_operand() {
+                    let address = instruction.ip_rel_memory_address();
+                    if targets.contains(&address) {
+                        found.insert(address);
+                    }
+                }
+            }
+            for address in found {
+                references
+                    .entry(address)
+                    .or_default()
+                    .push(function.clone());
+            }
+            step.set(index as u64 + 1);
+        }
+        step.finish(format!("找到 {} 个目标的引用", references.len()));
+        Ok(references)
     }
 
     pub fn functions(&self, progress: &Progress) -> Result<Vec<Range<u64>>> {
