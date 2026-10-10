@@ -1,4 +1,5 @@
 use std::{
+    cell::OnceCell,
     collections::{BTreeMap, BTreeSet},
     ops::Range,
     time::Instant,
@@ -11,6 +12,7 @@ use object::read::{Object, ObjectSection};
 use crate::{
     Result,
     progress::{FRAME, Progress},
+    xlog::Records,
 };
 
 pub type Symbols = BTreeMap<String, Vec<u64>>;
@@ -18,6 +20,7 @@ pub type References = BTreeMap<u64, Vec<Range<u64>>>;
 
 pub struct Image<'a> {
     file: PeFile64<'a>,
+    pub logs: OnceCell<std::result::Result<Records, String>>,
 }
 
 impl<'a> Image<'a> {
@@ -26,7 +29,10 @@ impl<'a> Image<'a> {
         if file.architecture() != object::Architecture::X86_64 {
             return Err("需要 Windows x64 PE 文件".into());
         }
-        Ok(Self { file })
+        Ok(Self {
+            file,
+            logs: OnceCell::new(),
+        })
     }
 
     pub fn base(&self) -> u64 {
@@ -152,15 +158,32 @@ impl<'a> Image<'a> {
         Ok(references)
     }
 
-    fn functions(&self) -> Result<Vec<Range<u64>>> {
+    fn unwind(&self) -> Result<&'a [[u8; 12]]> {
         let section = self
             .file
             .section_by_name(".pdata")
             .ok_or("找不到异常展开表")?;
-        let data = section.data()?;
-        let entries = data.as_chunks::<12>().0;
+        Ok(section.data()?.as_chunks::<12>().0)
+    }
+
+    pub fn function(&self, address: u64) -> Result<Option<Range<u64>>> {
+        let entries = self.unwind()?;
+        let index = entries.partition_point(|entry| {
+            let start = u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]);
+            self.base() + start as u64 <= address
+        });
+        let Some(entry) = index.checked_sub(1).and_then(|index| entries.get(index)) else {
+            return Ok(None);
+        };
+        let start = self.base() + u32::from_le_bytes(entry[..4].try_into()?) as u64;
+        let end = self.base() + u32::from_le_bytes(entry[4..8].try_into()?) as u64;
+        let function = start..end;
+        Ok(function.contains(&address).then_some(function))
+    }
+
+    fn functions(&self) -> Result<Vec<Range<u64>>> {
         let mut functions = Vec::new();
-        for entry in entries {
+        for entry in self.unwind()? {
             let start = u32::from_le_bytes(entry[..4].try_into()?) as u64;
             let end = u32::from_le_bytes(entry[4..8].try_into()?) as u64;
             if start < end {

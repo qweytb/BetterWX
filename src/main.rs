@@ -1,6 +1,7 @@
 mod feature;
 mod image;
 mod install;
+mod login;
 #[cfg(windows)]
 mod process;
 mod progress;

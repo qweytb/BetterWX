@@ -7,6 +7,7 @@ use std::{
 use crate::{
     Result,
     image::{Image, References, Symbols},
+    login,
     progress::Progress,
     store::{self, Content, Store},
     uia, updates,
@@ -102,7 +103,7 @@ impl Prepared {
     }
 }
 
-pub const FEATURES: &[Feature] = &[uia::FEATURE, updates::FEATURE];
+pub const FEATURES: &[Feature] = &[login::FEATURE, uia::FEATURE, updates::FEATURE];
 
 pub fn targets(target: &Path) -> Result<Vec<PathBuf>> {
     Ok(FEATURES

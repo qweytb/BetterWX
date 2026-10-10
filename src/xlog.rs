@@ -6,6 +6,8 @@ use crate::{
     progress::Progress,
 };
 
+pub type Records = BTreeMap<Vec<u8>, Vec<u64>>;
+
 fn decode(data: &[u8]) -> Option<Vec<u8>> {
     data.as_chunks::<2>()
         .0
@@ -18,11 +20,11 @@ fn decode(data: &[u8]) -> Option<Vec<u8>> {
         .collect()
 }
 
-pub fn find(image: &Image<'_>, names: &[&str], progress: &Progress) -> Result<Symbols> {
+fn parse(image: &Image<'_>, progress: &Progress) -> Result<Records> {
     let sections = image.sections()?;
     let total = sections.iter().map(|(_, data)| data.len() as u64).sum();
     let step = progress.start("解析日志字符串", total, "字节");
-    let mut records: BTreeMap<Vec<u8>, Vec<u64>> = BTreeMap::new();
+    let mut records = Records::new();
     let mut completed = 0;
     for (address, data) in sections {
         progress.check()?;
@@ -53,7 +55,15 @@ pub fn find(image: &Image<'_>, names: &[&str], progress: &Progress) -> Result<Sy
         step.set(completed);
     }
     step.finish(format!("取得 {} 条日志字符串", records.len()));
+    Ok(records)
+}
 
+pub fn find(image: &Image<'_>, names: &[&str], progress: &Progress) -> Result<Symbols> {
+    let records = image
+        .logs
+        .get_or_init(|| parse(image, progress).map_err(|error| error.to_string()))
+        .as_ref()
+        .map_err(|error| error.clone())?;
     let anchor = names
         .iter()
         .max_by_key(|name| name.len())
