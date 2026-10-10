@@ -5,7 +5,7 @@ use std::{
         ffi::{OsStrExt, OsStringExt},
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
     },
-    path::Path,
+    path::PathBuf,
     ptr::{null, null_mut},
 };
 
@@ -67,7 +67,7 @@ impl Process {
     }
 }
 
-pub fn using(path: &Path) -> Result<Vec<Process>> {
+pub fn using(paths: &[PathBuf]) -> Result<Vec<Process>> {
     let mut handle = 0;
     let mut key = [0; CCH_RM_SESSION_KEY as usize + 1];
     let error = unsafe { RmStartSession(&mut handle, 0, key.as_mut_ptr()) };
@@ -75,13 +75,29 @@ pub fn using(path: &Path) -> Result<Vec<Process>> {
         return Err(io::Error::from_raw_os_error(error as i32).into());
     }
     let session = Session(handle);
-    let path: Vec<u16> = path
-        .canonicalize()?
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    let error = unsafe { RmRegisterResources(session.0, 1, &path.as_ptr(), 0, null(), 0, null()) };
+    let paths: Vec<Vec<u16>> = paths
+        .iter()
+        .map(|path| {
+            Ok(path
+                .canonicalize()?
+                .as_os_str()
+                .encode_wide()
+                .chain(Some(0))
+                .collect())
+        })
+        .collect::<Result<_>>()?;
+    let pointers: Vec<_> = paths.iter().map(|path| path.as_ptr()).collect();
+    let error = unsafe {
+        RmRegisterResources(
+            session.0,
+            pointers.len() as u32,
+            pointers.as_ptr(),
+            0,
+            null(),
+            0,
+            null(),
+        )
+    };
     if error != 0 {
         return Err(io::Error::from_raw_os_error(error as i32).into());
     }

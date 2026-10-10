@@ -5,28 +5,35 @@ use iced_x86::{Code, Decoder, DecoderOptions, FastFormatter, Instruction, Regist
 
 use crate::{
     Result,
-    feature::{Edit, Feature},
+    feature::{Edit, Edits, Feature},
     image::Image,
     progress::{FRAME, Progress},
+    store::Store,
 };
 
 pub const FEATURE: Feature = Feature {
     id: "uia",
     name: "UI 自动化",
     description: "开放微信的原生无障碍控件查询",
+    files: &[],
     scan,
 };
 
-fn scan(data: &[u8], progress: &Progress) -> Result<Vec<Edit>> {
-    let image = Image::parse(data, progress)?;
+fn scan(store: &mut Store, progress: &Progress) -> Result<Edits> {
+    let target = store.target.clone();
+    let file = store.load(&target, progress)?;
+    let image = Image::parse(&file.original, progress)?;
     let offset = locate(&image, progress)?;
     let step = progress.activity("准备 UI 自动化补丁");
     let edits = vec![Edit {
         range: offset..offset + 1,
         bytes: vec![0xc3],
     }];
-    step.finish(format!("文件位置 {offset:#x}：{:02X} → C3", data[offset]));
-    Ok(edits)
+    step.finish(format!(
+        "文件位置 {offset:#x}：{:02X} → C3",
+        file.original[offset]
+    ));
+    Ok(Edits::from([(target, edits)]))
 }
 
 fn locate(image: &Image<'_>, progress: &Progress) -> Result<usize> {

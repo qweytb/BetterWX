@@ -8,7 +8,7 @@ mod store;
 mod tui;
 mod uia;
 
-use std::{collections::BTreeSet, env, error::Error, path::PathBuf, process::ExitCode};
+use std::{env, error::Error, path::PathBuf, process::ExitCode};
 
 use progress::Progress;
 use store::Store;
@@ -70,11 +70,11 @@ fn run() -> Result<()> {
     let progress = Progress::default();
     let mut store = Store::open(&path, &progress)?;
     let mut prepared = Vec::new();
-    let mut issue = None;
     if command != "restore" {
-        prepared = feature::scan(&store.original, &progress)?;
-        (store.enabled, issue) =
-            feature::inspect(&store.original, &store.current, &prepared, &progress)?;
+        prepared = feature::scan(&mut store, &progress)?;
+        feature::inspect(&mut store, &prepared, &progress)?;
+    } else {
+        store.load_backups(&feature::targets(&store.target)?, &progress)?;
     }
     println!("目标：{}", path.display());
     match command {
@@ -83,33 +83,35 @@ fn run() -> Result<()> {
                 println!(
                     "{}：{}",
                     patch.feature.name,
-                    if let Some(error) = patch.edits.as_ref().err().or(issue.as_ref()) {
+                    if let Some(error) = patch.issue(&store) {
                         error.as_str()
-                    } else if store.enabled.contains(patch.feature.id) {
-                        "开启"
                     } else {
-                        "关闭"
+                        patch.state(&store).label()
                     },
                 );
             }
         }
         "enable" | "disable" => {
-            if let Some(issue) = issue {
-                return Err(issue.into());
-            }
-            let mut enabled = store.enabled.clone();
             let feature = feature.ok_or("缺少功能名称")?;
-            if command == "enable" {
-                enabled.insert(feature.id.to_owned());
-            } else {
-                enabled.remove(feature.id);
+            let patch = prepared
+                .iter()
+                .find(|patch| patch.feature.id == feature.id)
+                .ok_or("找不到功能分析结果")?;
+            if let Some(issue) = patch.issue(&store) {
+                return Err(issue.clone().into());
             }
-            if enabled == store.enabled {
+            let enable = command == "enable";
+            let requested = if enable {
+                feature::State::Enabled
+            } else {
+                feature::State::Disabled
+            };
+            if patch.state(&store) == requested {
                 println!("当前状态已符合请求");
                 return Ok(());
             }
-            let output = feature::generate(&store.original, &enabled, &prepared)?;
-            store.save(output, enabled, &progress)?;
+            let contents = feature::change(&store, patch, enable, &prepared)?;
+            store.save(contents, &progress)?;
             println!(
                 "{}：{}",
                 feature.name,
@@ -121,11 +123,11 @@ fn run() -> Result<()> {
             );
         }
         "restore" => {
-            if store.current == store.original {
+            if store.changed().is_empty() {
                 println!("文件处于原始状态");
                 return Ok(());
             }
-            store.save(store.original.as_ref().clone(), BTreeSet::new(), &progress)?;
+            store.save(store.originals(), &progress)?;
             println!("已恢复原始文件");
         }
         _ => unreachable!(),

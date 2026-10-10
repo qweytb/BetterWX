@@ -497,13 +497,11 @@ fn bar(step: &Step, width: usize) -> String {
 
 fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
     let detail = path.display().to_string();
-    let Some((mut store, prepared, mut issue)) = screen.work("分析", &detail, |progress| {
+    let Some((mut store, prepared)) = screen.work("分析", &detail, |progress| {
         let mut store = Store::open(path, progress)?;
-        let prepared = feature::scan(&store.original, progress)?;
-        let issue;
-        (store.enabled, issue) =
-            feature::inspect(&store.original, &store.current, &prepared, progress)?;
-        Ok((store, prepared, issue))
+        let prepared = feature::scan(&mut store, progress)?;
+        feature::inspect(&mut store, &prepared, progress)?;
+        Ok((store, prepared))
     })?
     else {
         return Ok(());
@@ -516,12 +514,13 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
             .iter()
             .enumerate()
             .map(|(index, patch)| {
-                let error = patch.edits.as_ref().err().or(issue.as_ref());
+                let error = patch.issue(&store);
+                let state = patch.state(&store);
                 let label = patch.feature.name.to_owned();
                 let value = if pending == Some(index) {
                     format!(
                         " 结束占用进程并{}",
-                        if store.enabled.contains(patch.feature.id) {
+                        if state == feature::State::Enabled {
                             "关闭"
                         } else {
                             "开启"
@@ -532,10 +531,8 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                         " {}",
                         if error.is_some() {
                             "不可用"
-                        } else if store.enabled.contains(patch.feature.id) {
-                            "开启"
                         } else {
-                            "关闭"
+                            state.label()
                         }
                     )
                 };
@@ -567,25 +564,26 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
         )? {
             return Ok(());
         };
-        let mut enabled = store.enabled.clone();
-        if let Some(patch) = prepared.get(selected) {
-            if let Some(error) = patch.edits.as_ref().err().or(issue.as_ref()) {
+        let change = if let Some(patch) = prepared.get(selected) {
+            if let Some(error) = patch.issue(&store) {
                 notice = error.clone();
                 continue;
             }
-            if !enabled.remove(patch.feature.id) {
-                enabled.insert(patch.feature.id.to_owned());
-            }
+            Some((patch, patch.state(&store) != feature::State::Enabled))
         } else if selected == prepared.len() {
-            enabled.clear();
+            None
         } else {
             return Ok(());
-        }
-        if enabled == store.enabled && store.current == store.original {
+        };
+        let targets = match change {
+            Some((patch, enable)) => patch.targets(&store, enable)?,
+            None => store.changed(),
+        };
+        if targets.is_empty() {
             notice.clear();
             continue;
         }
-        let error = store.write_error();
+        let error = store.write_error(&targets);
         let terminate = error.is_some() && pending == Some(selected);
         if let Some(error) = error
             && !terminate
@@ -602,8 +600,14 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
             #[cfg(windows)]
             if terminate {
                 let step = progress.activity("查询占用进程");
-                step.detail(path.display().to_string());
-                let processes = crate::process::using(path)?;
+                step.detail(
+                    targets
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
+                let processes = crate::process::using(&targets)?;
                 step.finish(
                     processes
                         .iter()
@@ -617,21 +621,28 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                 }
             }
             let step = progress.activity("准备文件内容");
-            let output = feature::generate(&store.original, &enabled, &prepared)?;
-            step.finish(if enabled.is_empty() {
-                "恢复原始内容".to_owned()
-            } else {
-                enabled.iter().cloned().collect::<Vec<_>>().join("、")
-            });
-            store.save(output, enabled, progress)
+            let contents = match change {
+                Some((patch, enable)) => {
+                    let contents = feature::change(&store, patch, enable, &prepared)?;
+                    step.finish(format!(
+                        "{}：{}",
+                        patch.feature.name,
+                        if enable { "开启" } else { "关闭" }
+                    ));
+                    contents
+                }
+                None => {
+                    let contents = store.originals();
+                    step.finish("恢复原始内容");
+                    contents
+                }
+            };
+            store.save(contents, progress)
         });
         notice = match result {
             Ok(_) => String::new(),
             Err(error) => error.to_string(),
         };
-        if store.current == store.original {
-            issue = None;
-        }
         if screen.exiting {
             return Ok(());
         }
