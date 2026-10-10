@@ -38,7 +38,7 @@ fn scan(
 ) -> Result<Vec<Edit>> {
     let address = locate(image, symbols, references, progress)?;
     let offset = image.offset(address)?;
-    let step = progress.activity(format!("准备补丁：{}", FEATURE.name));
+    let step = progress.activity("准备补丁");
     let edits = vec![Edit {
         range: offset..offset + 1,
         bytes: vec![0xc3],

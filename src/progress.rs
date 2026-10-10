@@ -13,6 +13,7 @@ pub const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 120);
 
 #[derive(Clone)]
 pub struct Step {
+    pub group: Option<String>,
     pub name: String,
     pub total: u64,
     pub unit: &'static str,
@@ -51,13 +52,22 @@ impl Step {
 
 #[derive(Clone, Default)]
 pub struct Progress {
+    group: Option<String>,
     steps: Arc<Mutex<Vec<Step>>>,
     cancelled: Arc<AtomicBool>,
 }
 
 impl Progress {
+    pub fn group(&self, name: impl Into<String>) -> Self {
+        Self {
+            group: Some(name.into()),
+            ..self.clone()
+        }
+    }
+
     pub fn start(&self, name: impl Into<String>, total: u64, unit: &'static str) -> Step {
         let step = Step {
+            group: self.group.clone(),
             name: name.into(),
             total,
             unit,

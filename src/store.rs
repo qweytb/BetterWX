@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     fs::{self, OpenOptions},
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf, Prefix},
     sync::Arc,
 };
 
@@ -29,11 +29,23 @@ pub struct Content {
     pub enabled: BTreeSet<String>,
 }
 
+pub fn display(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::VerbatimDisk(_) => text[4..].to_owned(),
+            Prefix::VerbatimUNC(..) => format!(r"\\{}", &text[8..]),
+            _ => text.into_owned(),
+        },
+        _ => text.into_owned(),
+    }
+}
+
 fn read(path: &Path, progress: &Progress, name: &str) -> Result<Vec<u8>> {
     let mut file = fs::File::open(path)?;
     let total = file.metadata()?.len();
     let step = progress.start(name, total, "字节");
-    step.detail(path.display().to_string());
+    step.detail(display(path));
     let mut data = Vec::with_capacity(total as usize);
     let mut buffer = vec![0; 1024 * 1024];
     loop {
@@ -45,10 +57,7 @@ fn read(path: &Path, progress: &Progress, name: &str) -> Result<Vec<u8>> {
         data.extend_from_slice(&buffer[..count]);
         step.set(data.len() as u64);
     }
-    step.finish(format!(
-        "{} 已载入",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
+    step.finish("已载入");
     Ok(data)
 }
 
@@ -57,7 +66,7 @@ fn write(path: &Path, data: &[u8], progress: &Progress) -> Result<()> {
     let mut temporary = NamedTempFile::new_in(parent)?;
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let step = progress.start(format!("写入 {name}"), data.len() as u64, "字节");
-    step.detail(path.display().to_string());
+    step.detail(display(path));
     let mut completed = 0;
     for chunk in data.chunks(1024 * 1024) {
         progress.check()?;
@@ -100,7 +109,7 @@ impl Store {
                 .write(true)
                 .open(target)
                 .err()
-                .map(|error| format!("无法写入 {}：{error}", target.display()))
+                .map(|error| format!("无法写入 {}：{error}", display(target)))
         })
     }
 
@@ -155,10 +164,11 @@ impl Store {
 
 impl File {
     fn open(target: &Path, progress: &Progress) -> Result<Self> {
-        let current = Arc::new(read(target, progress, "载入文件")?);
+        let name = target.file_name().unwrap_or_default().to_string_lossy();
+        let current = Arc::new(read(target, progress, &format!("载入文件：{name}"))?);
         let backup = target.with_added_extension("bak");
         let original = if backup.try_exists()? {
-            Arc::new(read(&backup, progress, "载入原始副本")?)
+            Arc::new(read(&backup, progress, &format!("载入原始副本：{name}"))?)
         } else {
             current.clone()
         };
@@ -176,9 +186,15 @@ impl File {
         if self.current.as_slice() == content.data {
             return Ok(());
         }
-        if read(&self.target, progress, "读取当前文件")?.as_slice() != self.current.as_slice()
+        let name = self
+            .target
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        if read(&self.target, progress, &format!("读取当前文件：{name}"))?.as_slice()
+            != self.current.as_slice()
         {
-            return Err(format!("读取后目标文件发生了变化：{}", self.target.display()).into());
+            return Err(format!("读取后目标文件发生了变化：{}", display(&self.target)).into());
         }
         if !self.backup.try_exists()? {
             write(&self.backup, &self.original, progress)?;

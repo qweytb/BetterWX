@@ -78,7 +78,7 @@ fn run() -> Result<()> {
     } else {
         store.load_backups(&feature::targets(&store.target)?, &progress)?;
     }
-    println!("目标：{}", path.display());
+    println!("目标：{}", store::display(&path));
     match command {
         "status" => {
             for patch in &prepared {

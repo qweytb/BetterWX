@@ -8,7 +8,7 @@ use crate::{
     Result,
     image::{Image, References, Symbols},
     progress::Progress,
-    store::{Content, Store},
+    store::{self, Content, Store},
     uia, updates,
 };
 
@@ -141,18 +141,21 @@ pub fn scan(store: &mut Store, progress: &Progress) -> Result<Vec<Prepared>> {
                     .or_default()
                     .push((index, target)),
                 Err(error) => {
-                    prepared[index].edits = Err(format!("无法读取 {}：{error}", path.display()))
+                    prepared[index].edits =
+                        Err(format!("无法读取 {}：{error}", store::display(&path)))
                 }
             }
         }
     }
+    let mut analyzed = BTreeMap::new();
+    let mut pending: Vec<Vec<_>> = FEATURES.iter().map(|_| Vec::new()).collect();
     for (path, targets) in files {
         progress.check()?;
         let image = match Image::parse(&store.files[&path].original) {
             Ok(image) => image,
             Err(error) => {
                 for (index, _) in targets {
-                    prepared[index].edits = Err(format!("{}：{error}", path.display()));
+                    prepared[index].edits = Err(format!("{}：{error}", store::display(&path)));
                 }
                 continue;
             }
@@ -186,14 +189,28 @@ pub fn scan(store: &mut Store, progress: &Progress) -> Result<Vec<Prepared>> {
             }
         };
         for (index, target, symbols) in found {
+            pending[index].push((path.clone(), target, symbols));
+        }
+        analyzed.insert(path, (image, references));
+    }
+    for (index, targets) in pending.into_iter().enumerate() {
+        if prepared[index].edits.is_err() {
+            continue;
+        }
+        let progress = progress.group(prepared[index].feature.name);
+        for (path, target, symbols) in targets {
             progress.check()?;
-            match (target.scan)(&image, &symbols, &references, progress) {
+            let (image, references) = &analyzed[&path];
+            match (target.scan)(image, &symbols, references, &progress) {
                 Ok(edits) => {
                     if let Ok(changes) = &mut prepared[index].edits {
                         changes.entry(path.clone()).or_default().extend(edits);
                     }
                 }
-                Err(error) => prepared[index].edits = Err(error.to_string()),
+                Err(error) => {
+                    prepared[index].edits = Err(error.to_string());
+                    break;
+                }
             }
         }
     }
@@ -202,8 +219,9 @@ pub fn scan(store: &mut Store, progress: &Progress) -> Result<Vec<Prepared>> {
 
 pub fn inspect(store: &mut Store, prepared: &[Prepared], progress: &Progress) -> Result<()> {
     for (target, file) in &mut store.files {
-        let step = progress.activity("识别当前补丁");
-        step.detail(target.display().to_string());
+        let name = target.file_name().unwrap_or_default().to_string_lossy();
+        let step = progress.activity(format!("识别当前补丁：{name}"));
+        step.detail(store::display(target));
         let mut enabled = BTreeSet::new();
         for patch in prepared {
             progress.check()?;
@@ -234,8 +252,12 @@ pub fn inspect(store: &mut Store, prepared: &[Prepared], progress: &Progress) ->
                 (expected.len() != file.current.len())
                     .then_some(expected.len().min(file.current.len()))
             });
-        file.issue = difference
-            .map(|offset| format!("{} 的位置 {offset:#x} 存在未识别的改动", target.display()));
+        file.issue = difference.map(|offset| {
+            format!(
+                "{} 的位置 {offset:#x} 存在未识别的改动",
+                store::display(target)
+            )
+        });
         step.finish(if let Some(issue) = &file.issue {
             issue.clone()
         } else if enabled.is_empty() {

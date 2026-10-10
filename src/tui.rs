@@ -21,7 +21,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::{
     Result, feature, install,
     progress::{FRAME, Progress, Step},
-    store::Store,
+    store::{self, Store},
 };
 
 type Line = StyledContent<String>;
@@ -248,57 +248,75 @@ impl Screen {
                     .map(style)
                     .collect();
                 lines.push(style(String::new()));
-                let available = (height as usize).saturating_sub(lines.len() + 7);
-                for step in steps
-                    .iter()
-                    .rev()
-                    .skip(1)
-                    .take(available)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                {
+                let mut blocks: Vec<Vec<Line>> = Vec::new();
+                let mut group = None;
+                for (index, step) in steps.iter().enumerate() {
+                    if step.group.is_none() || step.group.as_deref() != group {
+                        let mut block = Vec::new();
+                        if let Some(name) = &step.group {
+                            block.push(style(format!("  {name}")));
+                        }
+                        blocks.push(block);
+                    }
+                    group = step.group.as_deref();
+                    let block = blocks.last_mut().expect("missing progress block");
+                    let indent = if step.group.is_some() { "    " } else { "  " };
                     let text = step.text();
-                    lines.push(style(clip(
-                        &format!(
-                            "  {}  {}",
-                            step.name,
-                            text.result.as_deref().unwrap_or(&text.detail)
-                        ),
-                        width as usize,
-                    )));
-                }
-                if let Some(step) = steps.last() {
-                    let text = step.text();
-                    lines.push(style(format!("  {}", step.name)));
+                    if index + 1 != steps.len() {
+                        block.extend(
+                            wrap(
+                                &format!(
+                                    "{}  {}",
+                                    step.name,
+                                    text.result.as_deref().unwrap_or(&text.detail)
+                                ),
+                                (width as usize).saturating_sub(indent.len()),
+                            )
+                            .into_iter()
+                            .map(|line| style(format!("{indent}{line}"))),
+                        );
+                        continue;
+                    }
+                    block.push(style(format!("{indent}{}", step.name)));
                     if let Some(result) = text.result {
-                        lines.extend(
-                            wrap(&result, width.saturating_sub(2) as usize)
+                        block.extend(
+                            wrap(&result, (width as usize).saturating_sub(indent.len()))
                                 .into_iter()
-                                .map(|line| style(format!("  {line}"))),
+                                .map(|line| style(format!("{indent}{line}"))),
                         );
                     } else {
-                        lines.extend(
-                            wrap(&text.detail, width.saturating_sub(2) as usize)
+                        block.extend(
+                            wrap(&text.detail, (width as usize).saturating_sub(indent.len()))
                                 .into_iter()
-                                .map(|line| style(format!("  {line}"))),
+                                .map(|line| style(format!("{indent}{line}"))),
                         );
                         if step.total != 0 {
                             if step.unit != "字节" {
-                                lines.push(style(format!(
-                                    "  {} / {} {}",
+                                block.push(style(format!(
+                                    "{indent}{} / {} {}",
                                     step.completed(),
                                     step.total,
                                     step.unit
                                 )));
                             }
-                            lines.push(style(format!(
-                                "  {}",
-                                bar(step, width.saturating_sub(4) as usize)
+                            block.push(style(format!(
+                                "{indent}{}",
+                                bar(step, (width as usize).saturating_sub(indent.len() + 2))
                             )));
                         }
                     }
                 }
+                let mut available = (height as usize).saturating_sub(lines.len() + 4);
+                let mut visible = Vec::new();
+                for mut block in blocks.into_iter().rev() {
+                    if block.len() > available && !visible.is_empty() {
+                        break;
+                    }
+                    block.truncate(available);
+                    available -= block.len();
+                    visible.push(block);
+                }
+                lines.extend(visible.into_iter().rev().flatten());
                 lines.push(style(String::new()));
                 lines.push(
                     (if cancelled {
@@ -496,7 +514,7 @@ fn bar(step: &Step, width: usize) -> String {
 }
 
 fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
-    let detail = path.display().to_string();
+    let detail = store::display(path);
     let Some((mut store, prepared)) = screen.work("分析", &detail, |progress| {
         let mut store = Store::open(path, progress)?;
         let prepared = feature::scan(&mut store, progress)?;
@@ -603,7 +621,7 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                 step.detail(
                     targets
                         .iter()
-                        .map(|path| path.display().to_string())
+                        .map(|path| store::display(path))
                         .collect::<Vec<_>>()
                         .join("\n"),
                 );
@@ -677,7 +695,7 @@ pub fn run() -> Result<()> {
                             .into_owned(),
                     ),
                     value: String::new(),
-                    detail: file.display().to_string(),
+                    detail: store::display(file),
                 }
             })
             .collect();
