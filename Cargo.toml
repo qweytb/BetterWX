@@ -1,0 +1,17 @@
+[package]
+name = "betterwx"
+version = "0.1.0"
+edition = "2024"
+
+[lints.rust]
+warnings = "deny"
+
+[dependencies]
+crossterm = { version = "0.29.0", default-features = false, features = ["events", "windows"] }
+tempfile = "3.27.0"
+unicode-width = "0.2.2"
+
+[target."cfg(windows)".dependencies]
+native-dialog = { version = "0.9.7", features = ["windows_dpi_awareness", "windows_visual_styles"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_RestartManager", "Win32_System_Threading"] }
+winreg = "0.56.0"
