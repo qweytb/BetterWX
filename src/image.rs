@@ -1,4 +1,10 @@
-use std::{cell::OnceCell, collections::BTreeMap, ffi::CStr, ops::Range};
+use std::{
+    cell::OnceCell,
+    collections::{BTreeMap, BTreeSet, HashMap, hash_map::Entry},
+    ffi::CStr,
+    num::NonZero,
+    ops::Range,
+};
 
 use iced_x86::{
     Decoder, DecoderOptions, FastFormatter, Instruction, OpKind, code_asm::CodeAssembler,
@@ -27,18 +33,52 @@ pub fn assembly(bytes: &[u8], address: u64) -> String {
 
 pub struct References {
     functions: Vec<Range<u64>>,
-    entries: Vec<(u64, usize)>,
+    targets: HashMap<u64, Callers>,
+    entries: Vec<Reference>,
+}
+
+struct Callers {
+    first: usize,
+    last: usize,
+}
+
+struct Reference {
+    function: usize,
+    next: Option<NonZero<usize>>,
 }
 
 impl References {
     pub fn get(&self, address: u64) -> Option<impl Iterator<Item = &Range<u64>>> {
-        let start = self.entries.partition_point(|entry| entry.0 < address);
-        let end = start + self.entries[start..].partition_point(|entry| entry.0 == address);
-        (start != end).then(|| {
-            self.entries[start..end]
-                .iter()
-                .map(|entry| &self.functions[entry.1])
+        self.targets.get(&address).map(|callers| {
+            std::iter::successors(Some(callers.first), |index| {
+                self.entries[*index].next.map(|next| next.get() - 1)
+            })
+            .map(|index| &self.functions[self.entries[index].function])
         })
+    }
+
+    fn insert(&mut self, address: u64, function: usize) {
+        let index = self.entries.len();
+        match self.targets.entry(address) {
+            Entry::Occupied(mut entry) => {
+                let callers = entry.get_mut();
+                if self.entries[callers.last].function == function {
+                    return;
+                }
+                self.entries[callers.last].next = NonZero::new(index + 1);
+                callers.last = index;
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(Callers {
+                    first: index,
+                    last: index,
+                });
+            }
+        }
+        self.entries.push(Reference {
+            function,
+            next: None,
+        });
     }
 }
 
@@ -207,6 +247,7 @@ impl<'a> Image<'a> {
         name: &str,
         labels: BTreeMap<u64, String>,
         progress: &Progress,
+        mut visit: impl FnMut(&References, &Range<u64>, &BTreeSet<u64>) -> Result<()>,
     ) -> Result<References> {
         let mut exports = BTreeMap::new();
         for export in self.file.exports()? {
@@ -217,15 +258,20 @@ impl<'a> Image<'a> {
                 exports.insert(address, String::from_utf8_lossy(name).into_owned());
             }
         }
-        let functions = self.functions()?;
-        let mut entries = Vec::new();
-        let step = progress.start("分析代码引用", functions.len() as u64, "函数");
+        let mut references = References {
+            functions: self.functions()?,
+            targets: HashMap::new(),
+            entries: Vec::new(),
+        };
+        let step = progress.start("分析代码引用", references.functions.len() as u64, "函数");
         step.detail(name);
-        for (index, function) in functions.iter().enumerate() {
+        for index in 0..references.functions.len() {
+            let function = references.functions[index].clone();
             progress.check()?;
             let bytes = self.data(function.start, (function.end - function.start) as usize)?;
             let mut decoder = Decoder::with_ip(64, bytes, function.start, DecoderOptions::NONE);
             let mut instruction = Instruction::default();
+            let mut changed = BTreeSet::new();
             while decoder.can_decode() {
                 decoder.decode_out(&mut instruction);
                 let target = if instruction.is_ip_rel_memory_operand() {
@@ -235,8 +281,11 @@ impl<'a> Image<'a> {
                 } else {
                     continue;
                 };
-                entries.push((target, index));
+                references.insert(target, index);
                 let symbol = labels.get(&target);
+                if symbol.is_some() {
+                    changed.insert(target);
+                }
                 let sampled = step.sample();
                 if sampled || symbol.is_some() {
                     let bytes = self.data(instruction.ip(), instruction.len())?;
@@ -266,64 +315,17 @@ impl<'a> Image<'a> {
                 }
             }
             step.set(index as u64 + 1);
+            if !changed.is_empty() {
+                visit(&references, &function, &changed)?;
+            }
         }
         step.finish(format!(
-            "{name}；{} 函数；{} 引用",
-            functions.len(),
-            entries.len()
+            "{name}；{} 函数；{} 目标；{} 引用",
+            references.functions.len(),
+            references.targets.len(),
+            references.entries.len(),
         ));
-        let step = progress.activity("排序引用索引");
-        let mut comparisons = 0_u64;
-        entries.sort_unstable_by(|left, right| {
-            comparisons += 1;
-            let order = left.cmp(right);
-            if step.sample() {
-                step.detail(format!(
-                    "{name}；{comparisons} 次比较\n\
-                     (0x{:X}, {}) {} (0x{:X}, {})",
-                    left.0,
-                    left.1,
-                    match order {
-                        std::cmp::Ordering::Less => "<",
-                        std::cmp::Ordering::Equal => "=",
-                        std::cmp::Ordering::Greater => ">",
-                    },
-                    right.0,
-                    right.1,
-                ));
-            }
-            order
-        });
-        progress.check()?;
-        step.finish(format!(
-            "{name}；{comparisons} 次比较；{} 引用",
-            entries.len()
-        ));
-        let total = entries.len();
-        let step = progress.start("合并重复引用", total as u64, "引用");
-        let mut processed = usize::from(total != 0);
-        let mut duplicates = 0;
-        let mut targets = processed;
-        entries.dedup_by(|left, right| {
-            processed += 1;
-            targets += usize::from(left.0 != right.0);
-            let equal = left == right;
-            duplicates += usize::from(equal);
-            if step.sample() {
-                step.set(processed as u64);
-                step.detail(format!(
-                    "{name}；(0x{:X}, {})；重复 {duplicates}；目标 {targets}",
-                    left.0, left.1,
-                ));
-            }
-            equal
-        });
-        step.finish(format!(
-            "{name}；{} → {} 引用；{targets} 目标",
-            total,
-            entries.len()
-        ));
-        Ok(References { functions, entries })
+        Ok(references)
     }
 
     fn string(&self, address: u64) -> Option<&str> {

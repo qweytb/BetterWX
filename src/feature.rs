@@ -26,7 +26,24 @@ pub struct Feature {
 pub struct Target {
     pub file: Option<&'static str>,
     pub find: fn(&Image<'_>, &Progress) -> Result<Symbols>,
-    pub scan: fn(&Image<'_>, &Symbols, &References, &Progress) -> Result<Vec<Edit>>,
+    pub scan: fn(Symbols) -> Box<dyn Analysis>,
+}
+
+pub trait Analysis {
+    fn visit(
+        &mut self,
+        image: &Image<'_>,
+        function: &Range<u64>,
+        references: &References,
+        progress: &Progress,
+    ) -> Result<Vec<Edit>>;
+
+    fn finish(
+        self: Box<Self>,
+        image: &Image<'_>,
+        references: &References,
+        progress: &Progress,
+    ) -> Result<Vec<Edit>>;
 }
 
 impl Target {
@@ -154,8 +171,6 @@ pub fn scan(store: &mut Store, progress: &Progress) -> Result<Vec<Prepared>> {
             }
         }
     }
-    let mut analyzed = BTreeMap::new();
-    let mut pending: Vec<Vec<_>> = FEATURES.iter().map(|_| Vec::new()).collect();
     for (path, targets) in files {
         progress.check()?;
         let image = match Image::parse(&store.files[&path].original) {
@@ -174,8 +189,15 @@ pub fn scan(store: &mut Store, progress: &Progress) -> Result<Vec<Prepared>> {
             }
             progress.check()?;
             match (target.find)(&image, progress) {
-                Ok(symbols) => found.push((index, target, symbols)),
-                Err(error) => prepared[index].edits = Err(error.to_string()),
+                Ok(symbols) => {
+                    let analysis = (target.scan)(symbols.clone());
+                    found.push((index, symbols, analysis));
+                }
+                Err(error) => {
+                    let error = error.to_string();
+                    progress.fail(&error);
+                    prepared[index].edits = Err(error);
+                }
             }
         }
         if found.is_empty() {
@@ -183,45 +205,74 @@ pub fn scan(store: &mut Store, progress: &Progress) -> Result<Vec<Prepared>> {
         }
         let labels = found
             .iter()
-            .flat_map(|(_, _, symbols)| symbols)
+            .flat_map(|(_, symbols, _)| symbols)
             .flat_map(|(name, addresses)| {
                 addresses
                     .iter()
                     .map(move |address| (*address, name.trim_end_matches('\0').to_owned()))
             })
             .collect();
+        let mut listeners: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+        for (index, (_, symbols, _)) in found.iter().enumerate() {
+            for address in symbols.values().flatten() {
+                listeners.entry(*address).or_default().push(index);
+            }
+        }
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        let references = match image.references(&name, labels, progress) {
-            Ok(references) => references,
-            Err(error) => {
-                for (index, _, _) in found {
-                    prepared[index].edits = Err(error.to_string());
+        let references =
+            match image.references(&name, labels, progress, |references, function, changed| {
+                let listeners: BTreeSet<_> = changed
+                    .iter()
+                    .flat_map(|address| &listeners[address])
+                    .copied()
+                    .collect();
+                for listener in listeners {
+                    progress.check()?;
+                    let (index, _, analysis) = &mut found[listener];
+                    if prepared[*index].edits.is_err() {
+                        continue;
+                    }
+                    let progress = progress.group(FEATURES[*index].name);
+                    match analysis.visit(&image, function, references, &progress) {
+                        Ok(edits) => {
+                            if let Ok(changes) = &mut prepared[*index].edits {
+                                changes.entry(path.clone()).or_default().extend(edits);
+                            }
+                        }
+                        Err(error) => {
+                            let error = error.to_string();
+                            progress.fail(&error);
+                            prepared[*index].edits = Err(error);
+                        }
+                    }
                 }
+                Ok(())
+            }) {
+                Ok(references) => references,
+                Err(error) => {
+                    progress.fail(&error.to_string());
+                    for (index, _, _) in found {
+                        prepared[index].edits = Err(error.to_string());
+                    }
+                    continue;
+                }
+            };
+        for (index, _, analysis) in found {
+            progress.check()?;
+            if prepared[index].edits.is_err() {
                 continue;
             }
-        };
-        for (index, target, symbols) in found {
-            pending[index].push((path.clone(), target, symbols));
-        }
-        analyzed.insert(path, (image, references));
-    }
-    for (index, targets) in pending.into_iter().enumerate() {
-        if prepared[index].edits.is_err() {
-            continue;
-        }
-        let progress = progress.group(prepared[index].feature.name);
-        for (path, target, symbols) in targets {
-            progress.check()?;
-            let (image, references) = &analyzed[&path];
-            match (target.scan)(image, &symbols, references, &progress) {
+            let progress = progress.group(FEATURES[index].name);
+            match analysis.finish(&image, &references, &progress) {
                 Ok(edits) => {
                     if let Ok(changes) = &mut prepared[index].edits {
                         changes.entry(path.clone()).or_default().extend(edits);
                     }
                 }
                 Err(error) => {
-                    prepared[index].edits = Err(error.to_string());
-                    break;
+                    let error = error.to_string();
+                    progress.fail(&error);
+                    prepared[index].edits = Err(error);
                 }
             }
         }

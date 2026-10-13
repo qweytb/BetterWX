@@ -20,13 +20,20 @@ pub struct Step {
     completed: Arc<AtomicU64>,
     requested: Arc<AtomicBool>,
     text: Arc<Mutex<Text>>,
+    records: Arc<Mutex<Vec<Record>>>,
 }
 
 #[derive(Clone, Default)]
 pub struct Text {
     pub detail: String,
-    pub records: Vec<String>,
-    pub result: Option<String>,
+    pub finished: bool,
+}
+
+#[derive(Clone)]
+pub struct Record {
+    pub group: Option<String>,
+    pub name: String,
+    pub detail: String,
 }
 
 impl Step {
@@ -43,11 +50,14 @@ impl Step {
     }
 
     pub fn record(&self, detail: impl Into<String>) {
-        self.text
+        self.records
             .lock()
             .expect("progress lock poisoned")
-            .records
-            .push(detail.into());
+            .push(Record {
+                group: self.group.clone(),
+                name: self.name.clone(),
+                detail: detail.into(),
+            });
     }
 
     pub fn request(&self) {
@@ -61,7 +71,8 @@ impl Step {
 
     pub fn finish(&self, result: impl Into<String>) {
         self.set(self.total);
-        self.text.lock().expect("progress lock poisoned").result = Some(result.into());
+        self.record(result);
+        self.text.lock().expect("progress lock poisoned").finished = true;
     }
 
     pub fn text(&self) -> Text {
@@ -73,6 +84,7 @@ impl Step {
 pub struct Progress {
     group: Option<String>,
     steps: Arc<Mutex<Vec<Step>>>,
+    records: Arc<Mutex<Vec<Record>>>,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -93,6 +105,7 @@ impl Progress {
             completed: Arc::default(),
             requested: Arc::new(AtomicBool::new(true)),
             text: Arc::default(),
+            records: self.records.clone(),
         };
         self.steps
             .lock()
@@ -106,20 +119,33 @@ impl Progress {
     }
 
     pub fn record(&self, name: &str, item: &str) {
-        let previous = self
-            .steps
-            .lock()
-            .expect("progress lock poisoned")
-            .last()
-            .filter(|step| step.group == self.group && step.name == name)
-            .cloned();
-        let step = previous.unwrap_or_else(|| self.activity(name));
-        let mut result = step.text().result.unwrap_or_default();
-        if !result.is_empty() {
-            result.push('、');
+        let mut records = self.records.lock().expect("progress lock poisoned");
+        if let Some(record) = records
+            .last_mut()
+            .filter(|record| record.group == self.group && record.name == name)
+        {
+            record.detail.push('、');
+            record.detail.push_str(item);
+        } else {
+            records.push(Record {
+                group: self.group.clone(),
+                name: name.to_owned(),
+                detail: item.to_owned(),
+            });
         }
-        result.push_str(item);
-        step.finish(result);
+    }
+
+    pub fn records(&self) -> Vec<Record> {
+        self.records.lock().expect("progress lock poisoned").clone()
+    }
+
+    pub fn fail(&self, error: &str) {
+        for step in self.steps() {
+            if step.group == self.group {
+                step.text.lock().expect("progress lock poisoned").finished = true;
+            }
+        }
+        self.record("分析失败", error);
     }
 
     pub fn steps(&self) -> Vec<Step> {

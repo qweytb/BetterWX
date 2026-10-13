@@ -1,9 +1,9 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, ops::Range};
 
 use crate::{
     Result,
-    feature::{Edit, Feature, Target},
-    image::{Image, References, Symbols, assembly},
+    feature::{Analysis, Edit, Feature, Target},
+    image::{Image, References, Symbols, assembly, functions},
     progress::Progress,
     xlog,
 };
@@ -53,6 +53,12 @@ const FUNCTIONS: &[(&str, &[u8])] = &[
     ),
 ];
 
+struct Scan {
+    symbols: Symbols,
+    functions: &'static [(&'static str, &'static [u8])],
+    found: BTreeSet<&'static str>,
+}
+
 fn edit(image: &Image<'_>, address: u64, bytes: &[u8]) -> Result<Edit> {
     image.data(address, bytes.len())?;
     let offset = image.offset(address)?;
@@ -67,39 +73,12 @@ fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
     xlog::find(image, &names, progress)
 }
 
-fn scan(
-    image: &Image<'_>,
-    symbols: &Symbols,
-    references: &References,
-    progress: &Progress,
-) -> Result<Vec<Edit>> {
-    let step = progress.start("准备更新补丁", FUNCTIONS.len() as u64, "个函数");
-    let mut edits = Vec::new();
-    for (index, (name, bytes)) in FUNCTIONS.iter().enumerate() {
-        progress.check()?;
-        let functions: BTreeSet<_> = symbols[*name]
-            .iter()
-            .filter_map(|address| references.get(*address))
-            .flatten()
-            .map(|function| function.start)
-            .collect();
-        let [address] = functions.into_iter().collect::<Vec<_>>()[..] else {
-            return Err(format!("无法唯一定位 {name}").into());
-        };
-        step.record(format!(
-            "{name}；RVA 0x{:08X}；入口 → {}",
-            address - image.base(),
-            assembly(bytes, address),
-        ));
-        edits.push(edit(image, address, bytes)?);
-        step.set(index as u64 + 1);
-    }
-    step.finish(format!(
-        "{} 入口；{} 字节",
-        edits.len(),
-        edits.iter().map(|edit| edit.bytes.len()).sum::<usize>()
-    ));
-    Ok(edits)
+fn scan(symbols: Symbols) -> Box<dyn Analysis> {
+    Box::new(Scan {
+        symbols,
+        functions: FUNCTIONS,
+        found: BTreeSet::new(),
+    })
 }
 
 fn find_launcher(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
@@ -109,27 +88,57 @@ fn find_launcher(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
     )]))
 }
 
-fn scan_launcher(
-    image: &Image<'_>,
-    symbols: &Symbols,
-    references: &References,
-    progress: &Progress,
-) -> Result<Vec<Edit>> {
-    let functions: BTreeSet<_> = symbols[KEY]
-        .iter()
-        .filter_map(|address| references.get(*address))
-        .flatten()
-        .map(|function| function.start)
-        .collect();
-    let [address] = functions.into_iter().collect::<Vec<_>>()[..] else {
-        return Err("无法唯一定位启动器的版本更新入口".into());
-    };
-    let step = progress.activity("准备启动器补丁");
-    let loader = edit(image, address, &[0x31, 0xc0, 0xc3])?;
-    step.finish(format!(
-        "Weixin.exe；RVA 0x{:08X}；入口 → {}",
-        address - image.base(),
-        assembly(&loader.bytes, address)
-    ));
-    Ok(vec![loader])
+fn scan_launcher(symbols: Symbols) -> Box<dyn Analysis> {
+    Box::new(Scan {
+        symbols,
+        functions: &[(KEY, &[0x31, 0xc0, 0xc3])],
+        found: BTreeSet::new(),
+    })
+}
+
+impl Analysis for Scan {
+    fn visit(
+        &mut self,
+        image: &Image<'_>,
+        function: &Range<u64>,
+        references: &References,
+        progress: &Progress,
+    ) -> Result<Vec<Edit>> {
+        let mut edits = Vec::new();
+        for &(name, bytes) in self.functions {
+            let matches = functions(name, &self.symbols, references);
+            if !matches.contains_key(&function.start) {
+                continue;
+            }
+            if matches.len() != 1 {
+                return Err(format!("无法唯一定位 {}", name.trim_end_matches('\0')).into());
+            }
+            if self.found.insert(name) {
+                let step = progress.activity("准备更新补丁");
+                let address = function.start;
+                edits.push(edit(image, address, bytes)?);
+                step.finish(format!(
+                    "{}；RVA 0x{:08X}；入口 → {}",
+                    name.trim_end_matches('\0'),
+                    address - image.base(),
+                    assembly(bytes, address),
+                ));
+            }
+        }
+        Ok(edits)
+    }
+
+    fn finish(
+        self: Box<Self>,
+        _image: &Image<'_>,
+        _references: &References,
+        _progress: &Progress,
+    ) -> Result<Vec<Edit>> {
+        for &(name, _) in self.functions {
+            if !self.found.contains(name) {
+                return Err(format!("找不到 {}", name.trim_end_matches('\0')).into());
+            }
+        }
+        Ok(Vec::new())
+    }
 }

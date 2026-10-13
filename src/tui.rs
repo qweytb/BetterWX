@@ -250,21 +250,21 @@ impl Screen {
                 lines.push(style(String::new()));
                 let mut logs = Vec::new();
                 let mut current = Vec::new();
-                for (index, step) in steps.iter().enumerate() {
-                    let name = step.group.as_deref().unwrap_or(&step.name);
+                for record in progress.records() {
+                    let name = record.group.as_deref().unwrap_or(&record.name);
+                    for line in record.detail.lines() {
+                        logs.extend(
+                            wrap(&format!("{name}：{line}"), width as usize)
+                                .into_iter()
+                                .map(style),
+                        );
+                    }
+                }
+                if let Some((step, text)) = steps.iter().rev().find_map(|step| {
                     let text = step.text();
-                    for record in text.records.iter().chain(text.result.iter()) {
-                        for line in record.lines() {
-                            logs.extend(
-                                wrap(&format!("{name}：{line}"), width as usize)
-                                    .into_iter()
-                                    .map(style),
-                            );
-                        }
-                    }
-                    if text.result.is_some() || index + 1 != steps.len() {
-                        continue;
-                    }
+                    (!text.finished).then_some((step, text))
+                }) {
+                    let name = step.group.as_deref().unwrap_or(&step.name);
                     step.request();
                     let mut detail = text.detail.lines();
                     if step.total != 0 {

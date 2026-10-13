@@ -1,10 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, btree_map::Entry},
+    ops::Range,
+};
 
 use iced_x86::{Code, Instruction, OpKind, Register};
 
 use crate::{
     Result,
-    feature::{Edit, Feature, Target},
+    feature::{Analysis, Edit, Feature, Target},
     image::{Image, References, Symbols, functions},
     progress::Progress,
     xlog,
@@ -57,81 +60,117 @@ fn calls(instructions: &[Instruction]) -> BTreeMap<u64, Vec<u64>> {
     calls
 }
 
-fn scan(
-    image: &Image<'_>,
-    symbols: &Symbols,
-    references: &References,
-    progress: &Progress,
-) -> Result<Vec<Edit>> {
-    let step = progress.activity("定位登录流程");
-    let [init] = &functions(INIT, symbols, references)
-        .into_values()
-        .collect::<Vec<_>>()[..]
-    else {
-        return Err("无法唯一定位账号信息初始化回调".into());
-    };
-    let [request] = &functions(REQUEST, symbols, references)
-        .into_values()
-        .collect::<Vec<_>>()[..]
-    else {
-        return Err("无法唯一定位登录请求函数".into());
-    };
-    let mut targets = BTreeSet::new();
-    for function in functions(BUTTON, symbols, references).into_values() {
-        progress.check()?;
-        for instruction in image.instructions(&function)? {
-            if matches!(instruction.code(), Code::Jmp_rel32_64 | Code::Jmp_rel8_64)
-                && !function.contains(&instruction.near_branch_target())
-            {
-                targets.insert(instruction.near_branch_target());
+struct Scan {
+    symbols: Symbols,
+    handlers: BTreeMap<u64, Vec<Instruction>>,
+    emitted: bool,
+}
+
+fn scan(symbols: Symbols) -> Box<dyn Analysis> {
+    Box::new(Scan {
+        symbols,
+        handlers: BTreeMap::new(),
+        emitted: false,
+    })
+}
+
+impl Analysis for Scan {
+    fn visit(
+        &mut self,
+        image: &Image<'_>,
+        function: &Range<u64>,
+        references: &References,
+        progress: &Progress,
+    ) -> Result<Vec<Edit>> {
+        if functions(BUTTON, &self.symbols, references).contains_key(&function.start) {
+            for instruction in image.instructions(function)? {
+                if !matches!(instruction.code(), Code::Jmp_rel32_64 | Code::Jmp_rel8_64)
+                    || function.contains(&instruction.near_branch_target())
+                {
+                    continue;
+                }
+                let target = instruction.near_branch_target();
+                if let Entry::Vacant(entry) = self.handlers.entry(target)
+                    && let Some(function) = image.function(target)?
+                    && function.start == target
+                {
+                    entry.insert(image.instructions(&function)?);
+                }
             }
         }
-    }
-    let mut handlers = BTreeMap::new();
-    for target in targets {
-        progress.check()?;
-        let Some(function) = image.function(target)? else {
-            continue;
-        };
-        if function.start == target
-            && image.instructions(&function)?.iter().any(|instruction| {
-                instruction.code() == Code::Call_rel32_64
-                    && instruction.near_branch_target() == request.start
-            })
-        {
-            handlers.insert(target, function);
+        let init = functions(INIT, &self.symbols, references);
+        let request = functions(REQUEST, &self.symbols, references);
+        if init.len() > 1 {
+            return Err("无法唯一定位账号信息初始化回调".into());
         }
+        if request.len() > 1 {
+            return Err("无法唯一定位登录请求函数".into());
+        }
+        let (Some(init), Some(request)) = (init.first_key_value(), request.first_key_value())
+        else {
+            return Ok(Vec::new());
+        };
+        let handlers: Vec<_> = self
+            .handlers
+            .iter()
+            .filter(|(_, instructions)| {
+                instructions.iter().any(|instruction| {
+                    instruction.code() == Code::Call_rel32_64
+                        && instruction.near_branch_target() == request.1.start
+                })
+            })
+            .collect();
+        if handlers.len() > 1 {
+            return Err("无法唯一定位登录按钮处理函数".into());
+        }
+        let Some(&(handler, instructions)) = handlers.first() else {
+            return Ok(Vec::new());
+        };
+        if self.emitted {
+            return Ok(Vec::new());
+        }
+        let initialized = calls(&image.instructions(init.1)?);
+        let login = calls(instructions);
+        let sites: Vec<_> = initialized
+            .iter()
+            .filter(|(target, _)| login.contains_key(target))
+            .flat_map(|(target, sites)| sites.iter().map(move |site| (*site, *target)))
+            .collect();
+        let [(site, notify)] = sites[..] else {
+            return Err("无法唯一定位初始化完成后的界面通知".into());
+        };
+        let step = progress.activity("准备补丁");
+        // The login handler already publishes the new view state.
+        let displacement = i32::try_from(*handler as i64 - (site + 5) as i64)?;
+        let offset = image.offset(site + 1)?;
+        step.finish(format!(
+            "RVA 0x{:08X}；call 0x{:08X} → call 0x{:08X}",
+            site - image.base(),
+            notify - image.base(),
+            handler - image.base(),
+        ));
+        self.emitted = true;
+        Ok(vec![Edit {
+            range: offset..offset + 4,
+            bytes: displacement.to_le_bytes().to_vec(),
+        }])
     }
-    let [handler] = &handlers.into_values().collect::<Vec<_>>()[..] else {
-        return Err("无法唯一定位登录按钮处理函数".into());
-    };
-    let initialized = calls(&image.instructions(init)?);
-    let login = calls(&image.instructions(handler)?);
-    let sites: Vec<_> = initialized
-        .iter()
-        .filter(|(target, _)| login.contains_key(target))
-        .flat_map(|(target, sites)| sites.iter().map(move |site| (*site, *target)))
-        .collect();
-    let [(site, notify)] = sites[..] else {
-        return Err("无法唯一定位初始化完成后的界面通知".into());
-    };
-    step.finish(format!(
-        "{INIT}；RVA 0x{:08X}\n{BUTTON}；RVA 0x{:08X}",
-        init.start - image.base(),
-        handler.start - image.base(),
-    ));
-    let step = progress.activity("准备补丁");
-    // The login handler already publishes the new view state.
-    let displacement = i32::try_from(handler.start as i64 - (site + 5) as i64)?;
-    let offset = image.offset(site + 1)?;
-    step.finish(format!(
-        "RVA 0x{:08X}；call 0x{:08X} → call 0x{:08X}",
-        site - image.base(),
-        notify - image.base(),
-        handler.start - image.base(),
-    ));
-    Ok(vec![Edit {
-        range: offset..offset + 4,
-        bytes: displacement.to_le_bytes().to_vec(),
-    }])
+
+    fn finish(
+        self: Box<Self>,
+        _image: &Image<'_>,
+        references: &References,
+        _progress: &Progress,
+    ) -> Result<Vec<Edit>> {
+        if functions(INIT, &self.symbols, references).len() != 1 {
+            return Err("无法唯一定位账号信息初始化回调".into());
+        }
+        if functions(REQUEST, &self.symbols, references).len() != 1 {
+            return Err("无法唯一定位登录请求函数".into());
+        }
+        if !self.emitted {
+            return Err("无法唯一定位登录按钮处理函数".into());
+        }
+        Ok(Vec::new())
+    }
 }

@@ -14,7 +14,7 @@ use iced_x86::{
 
 use crate::{
     Result,
-    feature::{Edit, Feature, Target},
+    feature::{Analysis, Edit, Feature, Target},
     image::{Image, References, Symbols, functions},
     progress::{Progress, Step},
     xlog,
@@ -30,6 +30,9 @@ const VIEW: &str = "virtual mmui::ChatMessageViewModel::OnMessageRevoke";
 const GROUP: &str = "[group msg]add groupinfo in revoked group msg:";
 const SUMMARY: &str = "kernel::service::SessionService::CoHandleMessageRevoke";
 const REFRESH: &str = "kernel::service::SessionService::CoHandleRevokedMessageOutOfDate";
+const FUNCTIONS: &[&str] = &[
+    REVOKE, DELETE, SORT, ADD, UNREAD, SESSION, VIEW, SUMMARY, REFRESH,
+];
 
 pub const FEATURE: Feature = Feature {
     id: "revoke",
@@ -45,6 +48,20 @@ pub const FEATURE: Feature = Feature {
 struct Message {
     local: i64,
     server: i64,
+}
+
+struct Scan {
+    symbols: Symbols,
+    plan: Option<Plan>,
+}
+
+struct Plan {
+    bridge: u64,
+    caller: Range<u64>,
+    cleanup: u64,
+    view: u64,
+    instructions: Vec<Instruction>,
+    view_type: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -169,25 +186,87 @@ fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
     )
 }
 
-fn scan(
+fn scan(symbols: Symbols) -> Box<dyn Analysis> {
+    Box::new(Scan {
+        symbols,
+        plan: None,
+    })
+}
+
+impl Analysis for Scan {
+    fn visit(
+        &mut self,
+        image: &Image<'_>,
+        _function: &Range<u64>,
+        references: &References,
+        progress: &Progress,
+    ) -> Result<Vec<Edit>> {
+        let mut found = BTreeMap::new();
+        for &name in FUNCTIONS {
+            let matches = functions(name, &self.symbols, references);
+            if matches.len() > 1 {
+                return Err(format!("无法唯一定位{name}").into());
+            }
+            if let Some(function) = matches.into_values().next() {
+                found.insert(name, function);
+            }
+        }
+        if self.plan.is_some() || found.len() != FUNCTIONS.len() {
+            return Ok(Vec::new());
+        }
+        let (edits, plan) = prepare(image, &self.symbols, &found, progress)?;
+        self.plan = Some(plan);
+        Ok(edits)
+    }
+
+    fn finish(
+        self: Box<Self>,
+        image: &Image<'_>,
+        references: &References,
+        progress: &Progress,
+    ) -> Result<Vec<Edit>> {
+        for &name in FUNCTIONS {
+            unique(
+                functions(name, &self.symbols, references)
+                    .into_values()
+                    .collect(),
+                name,
+            )?;
+        }
+        let plan = self.plan.expect("revoke analysis incomplete");
+        let callers = references
+            .get(plan.bridge)
+            .ok_or("找不到入库包装函数的引用")?;
+        if !callers.eq([&plan.caller]) {
+            return Err("入库包装函数还有其他引用".into());
+        }
+        if references.get(plan.cleanup).is_some() {
+            return Err("摘要清理函数还有其他调用".into());
+        }
+        let step = progress.activity("准备消息显示");
+        let edits = view(
+            image,
+            &plan.instructions,
+            references
+                .get(plan.view_type)
+                .ok_or("找不到消息视图类型的引用")?,
+            &step,
+        )?;
+        step.finish(format!(
+            "{VIEW}；RVA 0x{:08X}；sortSeq 相等 → 比较 localId",
+            plan.view - image.base(),
+        ));
+        Ok(edits)
+    }
+}
+
+fn prepare(
     image: &Image<'_>,
     symbols: &Symbols,
-    references: &References,
+    found: &BTreeMap<&str, Range<u64>>,
     progress: &Progress,
-) -> Result<Vec<Edit>> {
+) -> Result<(Vec<Edit>, Plan)> {
     let step = progress.activity("定位消息处理");
-    let mut found = BTreeMap::new();
-    for name in [
-        REVOKE, DELETE, SORT, ADD, UNREAD, SESSION, VIEW, SUMMARY, REFRESH,
-    ] {
-        progress.check()?;
-        let function = unique(
-            functions(name, symbols, references).into_values().collect(),
-            name,
-        )?;
-        step.detail(format!("{name}\nRVA {:#x}", function.start - image.base()));
-        found.insert(name, function);
-    }
     let root = image.instructions(&found[REVOKE])?;
     let deletion = wrapper(image, &root, found[DELETE].start)?;
     let delete_sites: Vec<_> = root
@@ -274,12 +353,6 @@ fn scan(
         })
         .ok_or("找不到消息视图类型")?
         .ip_rel_memory_address();
-    let callers = references
-        .get(add_bridge)
-        .ok_or("找不到入库包装函数的引用")?;
-    if !callers.eq([&added_function]) {
-        return Err("入库包装函数还有其他引用".into());
-    }
     let bridge = image
         .function(add_bridge)?
         .ok_or("找不到入库包装函数范围")?;
@@ -330,7 +403,6 @@ fn scan(
         &message,
         found[UNREAD].start,
         found[REFRESH].start,
-        references,
         progress,
     )?;
     step.finish(format!(
@@ -427,20 +499,17 @@ fn scan(
         found[REFRESH].start - image.base(),
     ));
 
-    let step = progress.activity("准备消息显示");
-    edits.extend(view(
-        image,
-        &shown,
-        references
-            .get(view_type)
-            .ok_or("找不到消息视图类型的引用")?,
-        &step,
-    )?);
-    step.finish(format!(
-        "{VIEW}；RVA 0x{:08X}；sortSeq 相等 → 比较 localId",
-        found[VIEW].start - image.base(),
-    ));
-    Ok(edits)
+    Ok((
+        edits,
+        Plan {
+            bridge: add_bridge,
+            caller: added_function,
+            cleanup: cleanup.start,
+            view: found[VIEW].start,
+            instructions: shown,
+            view_type,
+        },
+    ))
 }
 
 fn message_check(image: &Image<'_>, instructions: &[Instruction]) -> Result<u64> {
@@ -663,7 +732,6 @@ fn summary(
     message: &Message,
     update: u64,
     refresh: u64,
-    references: &References,
     progress: &Progress,
 ) -> Result<(Vec<Edit>, Range<u64>)> {
     let instructions = image.instructions(function)?;
@@ -724,7 +792,7 @@ fn summary(
         "撤回群信息更新入口",
     )?;
     let removed = compare[2].next_ip()..compare[2].near_branch_target();
-    let (mut edits, cleanup, address) = cleanup(image, function, &removed, references, progress)?;
+    let (mut edits, cleanup, address) = cleanup(image, function, &removed, progress)?;
     let mut branch = CodeAssembler::new(64)?;
     branch.jmp(removed.end)?;
     edits.push(patch(image, compare[0].ip()..removed.start, &mut branch)?);
@@ -761,7 +829,6 @@ fn cleanup(
     image: &Image<'_>,
     function: &Range<u64>,
     removed: &Range<u64>,
-    references: &References,
     progress: &Progress,
 ) -> Result<(Vec<Edit>, Range<u64>, u64)> {
     let unwind = image.unwind_info(function.start)?;
@@ -835,9 +902,6 @@ fn cleanup(
         .function(image.base() + action.1 as u64)?
         .ok_or("找不到摘要清理函数范围")?;
     progress.check()?;
-    if references.get(cleanup.start).is_some() {
-        return Err("摘要清理函数还有其他调用".into());
-    }
     let mut parent = state as i32;
     while parent >= 0 && !used.contains(&parent) {
         parent = actions.get(parent as usize).ok_or("清理状态超出范围")?.0;
