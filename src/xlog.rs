@@ -64,29 +64,42 @@ pub fn find(image: &Image<'_>, names: &[&str], progress: &Progress) -> Result<Sy
         .get_or_init(|| parse(image, progress).map_err(|error| error.to_string()))
         .as_ref()
         .map_err(|error| error.clone())?;
-    let anchor = names
-        .iter()
-        .max_by_key(|name| name.len())
-        .ok_or("缺少日志符号名称")?;
+    if names.is_empty() {
+        return Err("缺少日志符号名称".into());
+    }
     let step = progress.activity("恢复日志符号");
     step.detail(names.join("\n"));
     let mut streams = BTreeSet::new();
-    for ciphertext in records.keys().filter(|value| value.len() == anchor.len()) {
-        progress.check()?;
-        let stream: Vec<_> = ciphertext
-            .iter()
-            .zip(anchor.bytes())
-            .map(|(left, right)| left ^ right)
-            .collect();
-        if names.iter().all(|name| {
-            let encoded: Vec<_> = name
-                .bytes()
-                .zip(&stream)
+    let mut best = 0;
+    for anchor in names {
+        for ciphertext in records.keys().filter(|value| value.len() == anchor.len()) {
+            progress.check()?;
+            let stream: Vec<_> = ciphertext
+                .iter()
+                .zip(anchor.bytes())
                 .map(|(left, right)| left ^ right)
                 .collect();
-            records.contains_key(&encoded)
-        }) {
-            streams.insert(stream);
+            let matched = names
+                .iter()
+                .filter(|name| {
+                    if name.len() > stream.len() {
+                        return false;
+                    }
+                    let encoded: Vec<_> = name
+                        .bytes()
+                        .zip(&stream)
+                        .map(|(left, right)| left ^ right)
+                        .collect();
+                    records.contains_key(&encoded)
+                })
+                .count();
+            if matched > best {
+                best = matched;
+                streams.clear();
+            }
+            if matched == best {
+                streams.insert(stream);
+            }
         }
     }
     let [stream] = &streams.into_iter().collect::<Vec<_>>()[..] else {
@@ -95,14 +108,20 @@ pub fn find(image: &Image<'_>, names: &[&str], progress: &Progress) -> Result<Sy
     let addresses = names
         .iter()
         .map(|name| {
+            if name.len() > stream.len() {
+                return Err(format!("日志符号无法完整解码：{name}").into());
+            }
             let encoded: Vec<_> = name
                 .bytes()
                 .zip(stream)
                 .map(|(left, right)| left ^ right)
                 .collect();
-            ((*name).to_owned(), records[&encoded].clone())
+            let addresses = records
+                .get(&encoded)
+                .ok_or_else(|| format!("找不到日志符号：{name}"))?;
+            Ok(((*name).to_owned(), addresses.clone()))
         })
-        .collect();
+        .collect::<Result<_>>()?;
     step.finish(format!("找到 {} 个日志符号", names.len()));
     Ok(addresses)
 }

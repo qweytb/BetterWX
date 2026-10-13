@@ -5,18 +5,36 @@ use std::{
     time::Instant,
 };
 
-use iced_x86::{Decoder, DecoderOptions, FastFormatter, Instruction};
+use iced_x86::{
+    Decoder, DecoderOptions, FastFormatter, Instruction, OpKind, code_asm::CodeAssembler,
+};
+use object::endian::LittleEndian as LE;
+use object::pe;
 use object::read::pe::PeFile64;
 use object::read::{Object, ObjectSection};
 
 use crate::{
     Result,
+    feature::Edit,
     progress::{FRAME, Progress},
     xlog::Records,
 };
 
 pub type Symbols = BTreeMap<String, Vec<u64>>;
 pub type References = BTreeMap<u64, Vec<Range<u64>>>;
+
+pub fn functions(
+    name: &str,
+    symbols: &Symbols,
+    references: &References,
+) -> BTreeMap<u64, Range<u64>> {
+    symbols[name]
+        .iter()
+        .filter_map(|address| references.get(address))
+        .flatten()
+        .map(|function| (function.start, function.clone()))
+        .collect()
+}
 
 pub struct Image<'a> {
     file: PeFile64<'a>,
@@ -70,6 +88,71 @@ impl<'a> Image<'a> {
             }
         }
         Err(format!("地址 {address:#x} 没有对应的文件位置").into())
+    }
+
+    pub fn instructions(&self, function: &Range<u64>) -> Result<Vec<Instruction>> {
+        let bytes = self.data(function.start, (function.end - function.start) as usize)?;
+        Ok(
+            Decoder::with_ip(64, bytes, function.start, DecoderOptions::NONE)
+                .into_iter()
+                .collect(),
+        )
+    }
+
+    pub fn unwind_info(&self, address: u64) -> Result<u64> {
+        let entry = self
+            .unwind()?
+            .iter()
+            .find(|entry| {
+                self.base()
+                    + u32::from_le_bytes(entry[..4].try_into().expect("function RVA")) as u64
+                    == address
+            })
+            .ok_or("找不到函数展开记录")?;
+        Ok(self.base() + u32::from_le_bytes(entry[8..].try_into()?) as u64)
+    }
+
+    pub fn replace_function(
+        &self,
+        function: &Range<u64>,
+        code: &mut CodeAssembler,
+        unwind: &[u8],
+    ) -> Result<Vec<Edit>> {
+        let mut bytes = code.assemble(function.start)?;
+        let size = usize::try_from(function.end - function.start)?;
+        if bytes.len() > size {
+            return Err("原函数的指令空间不足".into());
+        }
+        bytes.resize(size, 0xcc);
+        let offset = self.offset(function.start)?;
+        let mut edits = vec![Edit {
+            range: offset..offset + size,
+            bytes,
+        }];
+        let address = self.unwind_info(function.start)?;
+        if self.data(address, unwind.len())? != unwind {
+            let header = self.data(address, 4)?;
+            let size = (4 + usize::from(header[2]) * 2).next_multiple_of(4);
+            let shared = self
+                .unwind()?
+                .iter()
+                .filter(|entry| {
+                    u32::from_le_bytes(entry[8..].try_into().expect("unwind RVA")) as u64
+                        == address - self.base()
+                })
+                .count();
+            if header[0] >> 3 != 0 || shared != 1 || unwind.len() > size {
+                return Err("原函数的展开信息无法原位改写".into());
+            }
+            let offset = self.offset(address)?;
+            let mut bytes = unwind.to_vec();
+            bytes.resize(size, 0);
+            edits.push(Edit {
+                range: offset..offset + size,
+                bytes,
+            });
+        }
+        Ok(edits)
     }
 
     pub fn find(&self, value: &[u8], progress: &Progress) -> Result<Vec<u64>> {
@@ -145,6 +228,12 @@ impl<'a> Image<'a> {
                         found.insert(address);
                     }
                 }
+                if instruction.op0_kind() == OpKind::NearBranch64 {
+                    let address = instruction.near_branch_target();
+                    if targets.contains(&address) {
+                        found.insert(address);
+                    }
+                }
             }
             for address in found {
                 references
@@ -159,11 +248,17 @@ impl<'a> Image<'a> {
     }
 
     fn unwind(&self) -> Result<&'a [[u8; 12]]> {
-        let section = self
+        let directory = self
             .file
-            .section_by_name(".pdata")
-            .ok_or("找不到异常展开表")?;
-        Ok(section.data()?.as_chunks::<12>().0)
+            .data_directory(pe::IMAGE_DIRECTORY_ENTRY_EXCEPTION)
+            .ok_or("找不到异常展开目录")?;
+        Ok(self
+            .data(
+                self.base() + u64::from(directory.virtual_address.get(LE)),
+                directory.size.get(LE) as usize,
+            )?
+            .as_chunks::<12>()
+            .0)
     }
 
     pub fn function(&self, address: u64) -> Result<Option<Range<u64>>> {

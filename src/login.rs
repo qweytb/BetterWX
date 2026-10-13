@@ -1,14 +1,11 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    ops::Range,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
-use iced_x86::{Code, Decoder, DecoderOptions, Instruction, OpKind, Register};
+use iced_x86::{Code, Instruction, OpKind, Register};
 
 use crate::{
     Result,
     feature::{Edit, Feature, Target},
-    image::{Image, References, Symbols},
+    image::{Image, References, Symbols, functions},
     progress::Progress,
     xlog,
 };
@@ -30,24 +27,6 @@ pub const FEATURE: Feature = Feature {
 
 fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
     xlog::find(image, &[INIT, BUTTON, REQUEST], progress)
-}
-
-fn functions(name: &str, symbols: &Symbols, references: &References) -> BTreeMap<u64, Range<u64>> {
-    symbols[name]
-        .iter()
-        .filter_map(|address| references.get(address))
-        .flatten()
-        .map(|function| (function.start, function.clone()))
-        .collect()
-}
-
-fn instructions(image: &Image<'_>, function: &Range<u64>) -> Result<Vec<Instruction>> {
-    let bytes = image.data(function.start, (function.end - function.start) as usize)?;
-    Ok(
-        Decoder::with_ip(64, bytes, function.start, DecoderOptions::NONE)
-            .into_iter()
-            .collect(),
-    )
 }
 
 fn calls(instructions: &[Instruction]) -> BTreeMap<u64, Vec<u64>> {
@@ -100,7 +79,7 @@ fn scan(
     let mut targets = BTreeSet::new();
     for function in functions(BUTTON, symbols, references).into_values() {
         progress.check()?;
-        for instruction in instructions(image, &function)? {
+        for instruction in image.instructions(&function)? {
             if matches!(instruction.code(), Code::Jmp_rel32_64 | Code::Jmp_rel8_64)
                 && !function.contains(&instruction.near_branch_target())
             {
@@ -115,7 +94,7 @@ fn scan(
             continue;
         };
         if function.start == target
-            && instructions(image, &function)?.iter().any(|instruction| {
+            && image.instructions(&function)?.iter().any(|instruction| {
                 instruction.code() == Code::Call_rel32_64
                     && instruction.near_branch_target() == request.start
             })
@@ -126,8 +105,8 @@ fn scan(
     let [handler] = &handlers.into_values().collect::<Vec<_>>()[..] else {
         return Err("无法唯一定位登录按钮处理函数".into());
     };
-    let initialized = calls(&instructions(image, init)?);
-    let login = calls(&instructions(image, handler)?);
+    let initialized = calls(&image.instructions(init)?);
+    let login = calls(&image.instructions(handler)?);
     let sites: Vec<_> = initialized
         .iter()
         .filter(|(target, _)| login.contains_key(target))

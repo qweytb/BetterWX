@@ -5,6 +5,7 @@ mod login;
 #[cfg(windows)]
 mod process;
 mod progress;
+mod revoke;
 mod store;
 mod tui;
 mod uia;
