@@ -379,6 +379,61 @@ pub fn change(
     Ok(contents)
 }
 
+pub fn describe(
+    store: &Store,
+    contents: &BTreeMap<PathBuf, Content>,
+    prepared: &[Prepared],
+    progress: &Progress,
+) -> Result<()> {
+    for (target, content) in contents {
+        let file = &store.files[target];
+        let name = target.file_name().unwrap_or_default().to_string_lossy();
+        for patch in prepared {
+            let Ok(edits) = &patch.edits else {
+                continue;
+            };
+            let Some(edits) = edits.get(target) else {
+                continue;
+            };
+            if file.enabled.contains(patch.feature.id) == content.enabled.contains(patch.feature.id)
+            {
+                continue;
+            }
+            let image = Image::parse(&file.original)?;
+            let step = progress.group(patch.feature.name).activity("生成文件内容");
+            let mut size = 0;
+            for edit in edits {
+                progress.check()?;
+                let before = &file.current[edit.range.start.min(file.current.len())
+                    ..edit.range.end.min(file.current.len())];
+                let after = &content.data[edit.range.start.min(content.data.len())
+                    ..edit.range.end.min(content.data.len())];
+                if before != after {
+                    step.record(format!(
+                        "{name}；{}",
+                        image.difference(&edit.range, &file.current, &content.data)?
+                    ));
+                    size += before
+                        .iter()
+                        .zip(after)
+                        .filter(|(left, right)| left != right)
+                        .count()
+                        + before.len().abs_diff(after.len());
+                }
+            }
+            step.finish(format!(
+                "{name}；{}；差异 {size} 字节",
+                if content.enabled.contains(patch.feature.id) {
+                    "启用"
+                } else {
+                    "关闭"
+                }
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn generate(
     original: &[u8],
     enabled: &BTreeSet<String>,

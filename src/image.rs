@@ -19,13 +19,26 @@ use crate::{Result, feature::Edit, progress::Progress, xlog::Records};
 pub type Symbols = BTreeMap<String, Vec<u64>>;
 
 pub fn assembly(bytes: &[u8], address: u64) -> String {
+    format(Decoder::with_ip(64, bytes, address, DecoderOptions::NONE))
+}
+
+fn format(instructions: impl IntoIterator<Item = Instruction>) -> String {
     let mut formatter = FastFormatter::new();
-    Decoder::with_ip(64, bytes, address, DecoderOptions::NONE)
+    instructions
         .into_iter()
         .map(|instruction| {
             let mut text = String::new();
             formatter.format(&instruction, &mut text);
             text
+        })
+        .collect::<Vec<_>>()
+        .chunk_by(|left, right| left == right)
+        .map(|run| {
+            if run.len() == 1 {
+                run[0].clone()
+            } else {
+                format!("{} × {}", run[0], run.len())
+            }
         })
         .collect::<Vec<_>>()
         .join("; ")
@@ -147,6 +160,46 @@ impl<'a> Image<'a> {
             }
         }
         Err(format!("地址 {address:#x} 没有对应的文件位置").into())
+    }
+
+    pub fn difference(&self, range: &Range<usize>, before: &[u8], after: &[u8]) -> Result<String> {
+        let address = self.file.sections().find_map(|section| {
+            let (start, size) = section.file_range()?;
+            let offset = (range.start as u64).checked_sub(start)?;
+            (offset < size).then_some(section.address() + offset)
+        });
+        let mut start = address;
+        let mut values = Vec::new();
+        for data in [before, after] {
+            if let Some(address) = address
+                && let Some(function) = self.function(address)?
+                && address + range.len() as u64 <= function.end
+            {
+                let offset = self.offset(function.start)?;
+                let end = offset + (function.end - function.start) as usize;
+                let bytes = &data[offset.min(data.len())..end.min(data.len())];
+                let mut instructions =
+                    Decoder::with_ip(64, bytes, function.start, DecoderOptions::NONE)
+                        .into_iter()
+                        .take_while(|instruction| instruction.ip() < address + range.len() as u64)
+                        .filter(|instruction| instruction.next_ip() > address)
+                        .peekable();
+                if let Some(instruction) = instructions.peek() {
+                    start = start.map(|address| address.min(instruction.ip()));
+                }
+                values.push(format(instructions));
+            } else {
+                values.push(format!(
+                    "{:02X?}",
+                    &data[range.start.min(data.len())..range.end.min(data.len())]
+                ));
+            }
+        }
+        let location = start.map_or_else(
+            || format!("offset 0x{:08X}", range.start),
+            |address| format!("RVA 0x{:08X}", address - self.base()),
+        );
+        Ok(format!("{location}；{} → {}", values[0], values[1]))
     }
 
     pub fn instructions(&self, function: &Range<u64>) -> Result<Vec<Instruction>> {

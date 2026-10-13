@@ -27,6 +27,7 @@ use crate::{
 type Line = StyledContent<String>;
 
 struct Item {
+    marker: &'static str,
     label: Line,
     value: String,
     detail: String,
@@ -35,6 +36,7 @@ struct Item {
 impl Item {
     fn action(label: StyledContent<&str>) -> Self {
         Self {
+            marker: ">",
             label: label.style().apply((*label.content()).to_owned()),
             value: String::new(),
             detail: String::new(),
@@ -164,6 +166,7 @@ impl Screen {
     fn select(
         &mut self,
         title: &str,
+        heading: &str,
         items: &[Item],
         selected: &mut usize,
         notice: &str,
@@ -188,25 +191,34 @@ impl Screen {
             }
             footer.push(style(String::new()));
             footer.extend(help.lines().map(|line| line.to_owned().bold()));
-            let visible = (height as usize).saturating_sub(footer.len() + 2).max(1);
+            let mut lines = Vec::new();
+            if !heading.is_empty() {
+                lines.push(style(heading.to_owned()));
+                lines.push(style(String::new()));
+            }
+            let offset = lines.len();
+            let visible = (height as usize)
+                .saturating_sub(footer.len() + offset + 2)
+                .max(1);
             let start = selected.saturating_sub(visible - 1);
-            let mut lines: Vec<Line> = items
-                .iter()
-                .skip(start)
-                .take(visible)
-                .map(|item| {
+            lines.extend(items.iter().enumerate().skip(start).take(visible).map(
+                |(index, item)| {
                     item.label.style().apply(format!(
-                        "  > {}   {}",
+                        "  {} {}    {}",
+                        item.marker,
                         item.label.content(),
-                        item.value
+                        if index == *selected { &item.value } else { "" },
                     ))
-                })
-                .collect();
+                },
+            ));
             lines.extend(footer);
             self.draw(
                 title,
                 lines,
-                Some((*selected - start, item.label.content().chars().count() + 7)),
+                Some((
+                    offset + *selected - start,
+                    item.label.content().chars().count() + 7,
+                )),
             )?;
             let Some(key) = self.key()? else {
                 continue;
@@ -490,8 +502,17 @@ fn bar(step: &Step, width: usize) -> String {
     format!("{result} {:5.1}%", fraction * 100.0)
 }
 
+fn version(path: &Path) -> String {
+    path.parent()
+        .unwrap_or(path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
-    let detail = store::display(path);
+    let detail = format!(" -- {}", version(path));
     let Some((mut store, prepared)) = screen.work("分析", &detail, |progress| {
         let mut store = Store::open(path, progress)?;
         let prepared = feature::scan(&mut store, progress)?;
@@ -514,7 +535,7 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                 let label = patch.feature.name.to_owned();
                 let value = if pending == Some(index) {
                     format!(
-                        " 结束占用进程并{}",
+                        "结束占用进程并{}",
                         if state == feature::State::Enabled {
                             "关闭"
                         } else {
@@ -522,16 +543,21 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                         }
                     )
                 } else {
-                    format!(
-                        " {}",
-                        if error.is_some() {
-                            "不可用"
-                        } else {
-                            state.label()
-                        }
-                    )
+                    if error.is_some() {
+                        "不可用"
+                    } else if state == feature::State::Enabled {
+                        "已启用"
+                    } else {
+                        "未启用"
+                    }
+                    .to_owned()
                 };
                 Item {
+                    marker: if error.is_none() && state == feature::State::Enabled {
+                        "■"
+                    } else {
+                        "□"
+                    },
                     label: if error.is_some() || pending == Some(index) {
                         label.red()
                     } else {
@@ -547,11 +573,12 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
         let mut restore = Item::action(style("恢复原版"));
         if pending == Some(prepared.len()) {
             restore.label = restore.label.red();
-            restore.value = " 结束占用进程并恢复".to_owned();
+            restore.value = "结束占用进程并恢复".to_owned();
         }
         items.extend([restore, Item::action(style("返回"))]);
         if !screen.select(
             "功能",
+            &detail,
             &items,
             &mut selected,
             &notice,
@@ -632,6 +659,7 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                     contents
                 }
             };
+            feature::describe(&store, &contents, &prepared, progress)?;
             store.save(contents, progress)
         });
         notice = match result {
@@ -661,19 +689,11 @@ pub fn run() -> Result<()> {
     while !screen.exiting {
         let mut items: Vec<Item> = versions
             .iter()
-            .map(|file| {
-                let directory = file.parent().unwrap_or(file);
-                Item {
-                    label: style(
-                        directory
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned(),
-                    ),
-                    value: String::new(),
-                    detail: store::display(file),
-                }
+            .map(|file| Item {
+                marker: ">",
+                label: style(version(file)),
+                value: String::new(),
+                detail: store::display(file),
             })
             .collect();
         items.extend([
@@ -684,6 +704,7 @@ pub fn run() -> Result<()> {
         ]);
         if !screen.select(
             "选择版本",
+            "",
             &items,
             &mut selected,
             &notice,
