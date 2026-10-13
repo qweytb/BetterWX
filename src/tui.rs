@@ -248,75 +248,52 @@ impl Screen {
                     .map(style)
                     .collect();
                 lines.push(style(String::new()));
-                let mut blocks: Vec<Vec<Line>> = Vec::new();
-                let mut group = None;
+                let mut logs = Vec::new();
+                let mut current = Vec::new();
                 for (index, step) in steps.iter().enumerate() {
-                    if step.group.is_none() || step.group.as_deref() != group {
-                        let mut block = Vec::new();
-                        if let Some(name) = &step.group {
-                            block.push(style(format!("  {name}")));
-                        }
-                        blocks.push(block);
-                    }
-                    group = step.group.as_deref();
-                    let block = blocks.last_mut().expect("missing progress block");
-                    let indent = if step.group.is_some() { "    " } else { "  " };
+                    let name = step.group.as_deref().unwrap_or(&step.name);
                     let text = step.text();
-                    if index + 1 != steps.len() {
-                        block.extend(
-                            wrap(
-                                &format!(
-                                    "{}  {}",
-                                    step.name,
-                                    text.result.as_deref().unwrap_or(&text.detail)
-                                ),
-                                (width as usize).saturating_sub(indent.len()),
-                            )
-                            .into_iter()
-                            .map(|line| style(format!("{indent}{line}"))),
-                        );
+                    for record in text.records.iter().chain(text.result.iter()) {
+                        for line in record.lines() {
+                            logs.extend(
+                                wrap(&format!("{name}：{line}"), width as usize)
+                                    .into_iter()
+                                    .map(style),
+                            );
+                        }
+                    }
+                    if text.result.is_some() || index + 1 != steps.len() {
                         continue;
                     }
-                    block.push(style(format!("{indent}{}", step.name)));
-                    if let Some(result) = text.result {
-                        block.extend(
-                            wrap(&result, (width as usize).saturating_sub(indent.len()))
-                                .into_iter()
-                                .map(|line| style(format!("{indent}{line}"))),
+                    step.request();
+                    let mut detail = text.detail.lines();
+                    if step.total != 0 {
+                        let heading = format!(
+                            "{name}：{}/{} {}；",
+                            step.completed(),
+                            step.total,
+                            step.unit
                         );
+                        let size = (width as usize).saturating_sub(heading.width());
+                        current.push(style(clip(
+                            &format!("{heading}{}", bar(step, size)),
+                            width as usize,
+                        )));
                     } else {
-                        block.extend(
-                            wrap(&text.detail, (width as usize).saturating_sub(indent.len()))
-                                .into_iter()
-                                .map(|line| style(format!("{indent}{line}"))),
-                        );
-                        if step.total != 0 {
-                            if step.unit != "字节" {
-                                block.push(style(format!(
-                                    "{indent}{} / {} {}",
-                                    step.completed(),
-                                    step.total,
-                                    step.unit
-                                )));
-                            }
-                            block.push(style(format!(
-                                "{indent}{}",
-                                bar(step, (width as usize).saturating_sub(indent.len() + 2))
-                            )));
-                        }
+                        current.push(style(clip(
+                            &format!("{name}：{}", detail.next().unwrap_or_default()),
+                            width as usize,
+                        )));
                     }
+                    current.push(style(clip(
+                        &format!("  {}", detail.collect::<Vec<_>>().join("；")),
+                        width as usize,
+                    )));
                 }
-                let mut available = (height as usize).saturating_sub(lines.len() + 4);
-                let mut visible = Vec::new();
-                for mut block in blocks.into_iter().rev() {
-                    if block.len() > available && !visible.is_empty() {
-                        break;
-                    }
-                    block.truncate(available);
-                    available -= block.len();
-                    visible.push(block);
-                }
-                lines.extend(visible.into_iter().rev().flatten());
+                let available = (height as usize).saturating_sub(lines.len() + current.len() + 4);
+                let skip = logs.len().saturating_sub(available);
+                lines.extend(logs.into_iter().skip(skip));
+                lines.extend(current);
                 lines.push(style(String::new()));
                 lines.push(
                     (if cancelled {
@@ -643,7 +620,7 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                 Some((patch, enable)) => {
                     let contents = feature::change(&store, patch, enable, &prepared)?;
                     step.finish(format!(
-                        "{}：{}",
+                        "{}；{}",
                         patch.feature.name,
                         if enable { "开启" } else { "关闭" }
                     ));

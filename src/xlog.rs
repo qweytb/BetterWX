@@ -50,11 +50,19 @@ fn parse(image: &Image<'_>, progress: &Progress) -> Result<Records> {
                     .or_default()
                     .push(address + start as u64);
             }
+            step.set(completed + end as u64);
+            if step.sample() {
+                step.detail(format!(
+                    "RVA 0x{:08X}；length {length}；{:02X?}",
+                    address + start as u64 - image.base(),
+                    &data[start..=end],
+                ));
+            }
         }
         completed += data.len() as u64;
         step.set(completed);
     }
-    step.finish(format!("取得 {} 条日志字符串", records.len()));
+    step.finish(format!("{} 字符串", records.len()));
     Ok(records)
 }
 
@@ -68,12 +76,13 @@ pub fn find(image: &Image<'_>, names: &[&str], progress: &Progress) -> Result<Sy
         return Err("缺少日志符号名称".into());
     }
     let step = progress.activity("恢复日志符号");
-    step.detail(names.join("\n"));
     let mut streams = BTreeSet::new();
     let mut best = 0;
+    let mut candidates = 0;
     for anchor in names {
         for ciphertext in records.keys().filter(|value| value.len() == anchor.len()) {
             progress.check()?;
+            candidates += 1;
             let stream: Vec<_> = ciphertext
                 .iter()
                 .zip(anchor.bytes())
@@ -100,6 +109,13 @@ pub fn find(image: &Image<'_>, names: &[&str], progress: &Progress) -> Result<Sy
             if matched == best {
                 streams.insert(stream);
             }
+            if step.sample() {
+                step.detail(format!(
+                    "{candidates} 个 XOR 候选；匹配 {matched}/{}；最佳 {best}/{}\n{anchor}",
+                    names.len(),
+                    names.len(),
+                ));
+            }
         }
     }
     let [stream] = &streams.into_iter().collect::<Vec<_>>()[..] else {
@@ -122,6 +138,10 @@ pub fn find(image: &Image<'_>, names: &[&str], progress: &Progress) -> Result<Sy
             Ok(((*name).to_owned(), addresses.clone()))
         })
         .collect::<Result<_>>()?;
-    step.finish(format!("找到 {} 个日志符号", names.len()));
+    step.finish(format!(
+        "{} 符号；XOR 流 {} 字节",
+        names.len(),
+        stream.len()
+    ));
     Ok(addresses)
 }

@@ -44,8 +44,6 @@ pub fn display(path: &Path) -> String {
 fn read(path: &Path, progress: &Progress, name: &str) -> Result<Vec<u8>> {
     let mut file = fs::File::open(path)?;
     let total = file.metadata()?.len();
-    let step = progress.start(name, total, "字节");
-    step.detail(display(path));
     let mut data = Vec::with_capacity(total as usize);
     let mut buffer = vec![0; 1024 * 1024];
     loop {
@@ -55,9 +53,11 @@ fn read(path: &Path, progress: &Progress, name: &str) -> Result<Vec<u8>> {
             break;
         }
         data.extend_from_slice(&buffer[..count]);
-        step.set(data.len() as u64);
     }
-    step.finish("已载入");
+    progress.record(
+        name,
+        &path.file_name().unwrap_or_default().to_string_lossy(),
+    );
     Ok(data)
 }
 
@@ -65,8 +65,8 @@ fn write(path: &Path, data: &[u8], progress: &Progress) -> Result<()> {
     let parent = path.parent().ok_or("目标文件缺少父目录")?;
     let mut temporary = NamedTempFile::new_in(parent)?;
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let step = progress.start(format!("写入 {name}"), data.len() as u64, "字节");
-    step.detail(display(path));
+    let step = progress.start("写入文件", data.len() as u64, "字节");
+    step.detail(name.as_ref());
     let mut completed = 0;
     for chunk in data.chunks(1024 * 1024) {
         progress.check()?;
@@ -77,7 +77,7 @@ fn write(path: &Path, data: &[u8], progress: &Progress) -> Result<()> {
     temporary.as_file().sync_all()?;
     progress.check()?;
     temporary.persist(path)?;
-    step.finish(format!("{name} 已写入"));
+    step.finish(format!("{name}；{} 字节", data.len()));
     Ok(())
 }
 
@@ -164,11 +164,10 @@ impl Store {
 
 impl File {
     fn open(target: &Path, progress: &Progress) -> Result<Self> {
-        let name = target.file_name().unwrap_or_default().to_string_lossy();
-        let current = Arc::new(read(target, progress, &format!("载入文件：{name}"))?);
+        let current = Arc::new(read(target, progress, "载入文件")?);
         let backup = target.with_added_extension("bak");
         let original = if backup.try_exists()? {
-            Arc::new(read(&backup, progress, &format!("载入原始副本：{name}"))?)
+            Arc::new(read(&backup, progress, "载入文件")?)
         } else {
             current.clone()
         };
@@ -186,13 +185,7 @@ impl File {
         if self.current.as_slice() == content.data {
             return Ok(());
         }
-        let name = self
-            .target
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
-        if read(&self.target, progress, &format!("读取当前文件：{name}"))?.as_slice()
-            != self.current.as_slice()
+        if read(&self.target, progress, "读取当前文件")?.as_slice() != self.current.as_slice()
         {
             return Err(format!("读取后目标文件发生了变化：{}", display(&self.target)).into());
         }

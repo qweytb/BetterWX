@@ -5,7 +5,7 @@ use iced_x86::{Code, Decoder, DecoderOptions, Instruction, Register};
 use crate::{
     Result,
     feature::{Edit, Feature, Target},
-    image::{Image, References, Symbols},
+    image::{Image, References, Symbols, assembly},
     progress::Progress,
 };
 
@@ -43,9 +43,13 @@ fn scan(
         range: offset..offset + 1,
         bytes: vec![0xc3],
     }];
+    let instruction =
+        Decoder::with_ip(64, image.data(address, 16)?, address, DecoderOptions::NONE).decode();
     step.finish(format!(
-        "文件位置 {offset:#x}：{:02X} → C3",
-        image.data(address, 1)?[0]
+        "RVA 0x{:08X}；{:02X} → C3；{} → ret",
+        address - image.base(),
+        image.data(address, 1)?[0],
+        assembly(image.data(address, instruction.len())?, address),
     ));
     Ok(edits)
 }
@@ -100,7 +104,7 @@ fn locate(
         return Err("无障碍开关的初始值与预期不同".into());
     }
     step.finish(format!(
-        "写入函数 RVA {:#x}，开关 RVA {:#x}",
+        "RVA 0x{:08X} → byte [RVA 0x{:08X}]；初值 01",
         setter - image.base(),
         flag - image.base()
     ));

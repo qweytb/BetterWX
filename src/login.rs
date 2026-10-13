@@ -116,7 +116,7 @@ fn scan(
         return Err("无法唯一定位初始化完成后的界面通知".into());
     };
     step.finish(format!(
-        "初始化 RVA {:#x}，登录处理 RVA {:#x}",
+        "{INIT}；RVA 0x{:08X}\n{BUTTON}；RVA 0x{:08X}",
         init.start - image.base(),
         handler.start - image.base(),
     ));
@@ -125,7 +125,7 @@ fn scan(
     let displacement = i32::try_from(handler.start as i64 - (site + 5) as i64)?;
     let offset = image.offset(site + 1)?;
     step.finish(format!(
-        "调用 RVA {:#x}：{:#x} → {:#x}",
+        "RVA 0x{:08X}；call 0x{:08X} → call 0x{:08X}",
         site - image.base(),
         notify - image.base(),
         handler.start - image.base(),

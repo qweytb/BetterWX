@@ -16,7 +16,7 @@ use crate::{
     Result,
     feature::{Edit, Feature, Target},
     image::{Image, References, Symbols, functions},
-    progress::Progress,
+    progress::{Progress, Step},
     xlog,
 };
 
@@ -334,7 +334,7 @@ fn scan(
         progress,
     )?;
     step.finish(format!(
-        "撤回 RVA {:#x}，发送者判定 RVA {:#x}",
+        "{REVOKE}；RVA 0x{:08X}\n发送者判定；RVA 0x{:08X}",
         found[REVOKE].start - image.base(),
         own - image.base(),
     ));
@@ -390,6 +390,12 @@ fn scan(
     edits.extend(image.replace_function(&cleanup, &mut group, &[1, 4, 1, 0, 4, 0x42, 0, 0])?);
     for index in delete_sites {
         edits.push(call_patch(image, &root[index], bridge.start)?);
+        step.record(format!(
+            "RVA 0x{:08X}；call 0x{:08X} → call 0x{:08X}",
+            root[index].ip() - image.base(),
+            deletion - image.base(),
+            bridge.start - image.base(),
+        ));
     }
     let mut group = CodeAssembler::new(64)?;
     group.call(cleanup.start)?;
@@ -409,7 +415,17 @@ fn scan(
     )?);
     edits.push(empty);
     edits.push(unread_count(image, &unread, session_call)?);
-    step.finish(format!("保留函数 RVA {:#x}", bridge.start - image.base()));
+    step.finish(format!(
+        "发送者判定：AL ≠ 0 → jmp 0x{:08X}；AL = 0 → ret\n\
+         提示字段：localId [+{local:#x}] → 0；svrId [+{server:#x}] += 1\n\
+         {ADD}：新增记录参数 = (localId == 0)\n\
+         图片组继承条件：call 0x{:08X}；test al,al；je 跳过继承\n\
+         {UNREAD}：保留未读计数参数 → 1\n\
+         {SUMMARY}：call {REFRESH}；RVA 0x{:08X}",
+        deletion - image.base(),
+        cleanup.start - image.base(),
+        found[REFRESH].start - image.base(),
+    ));
 
     let step = progress.activity("准备消息显示");
     edits.extend(view(
@@ -418,8 +434,12 @@ fn scan(
         references
             .get(view_type)
             .ok_or("找不到消息视图类型的引用")?,
+        &step,
     )?);
-    step.finish("消息排序与图片组处理");
+    step.finish(format!(
+        "{VIEW}；RVA 0x{:08X}；sortSeq 相等 → 比较 localId",
+        found[VIEW].start - image.base(),
+    ));
     Ok(edits)
 }
 
@@ -938,6 +958,7 @@ fn view<'a>(
     image: &Image<'_>,
     instructions: &[Instruction],
     types: impl Iterator<Item = &'a Range<u64>>,
+    step: &Step,
 ) -> Result<Vec<Edit>> {
     let comparisons = comparisons(instructions);
     if comparisons.is_empty() {
@@ -1001,6 +1022,11 @@ fn view<'a>(
         }
     }
     let accessor = unique(accessors.into_iter().collect(), "图片组消息访问函数")?;
+    step.record(format!(
+        "视图访问：call 0x{:08X} → call 0x{:08X}",
+        cast - image.base(),
+        accessor - image.base(),
+    ));
     let mut edits = Vec::new();
     for comparison in comparisons {
         edits.push(view_item(

@@ -1,4 +1,4 @@
-use std::{cell::OnceCell, collections::BTreeMap, ops::Range, time::Instant};
+use std::{cell::OnceCell, collections::BTreeMap, ffi::CStr, ops::Range};
 
 use iced_x86::{
     Decoder, DecoderOptions, FastFormatter, Instruction, OpKind, code_asm::CodeAssembler,
@@ -6,16 +6,24 @@ use iced_x86::{
 use object::endian::LittleEndian as LE;
 use object::pe;
 use object::read::pe::PeFile64;
-use object::read::{Object, ObjectSection};
+use object::read::{ExportTarget, NameOrOrdinal, Object, ObjectSection};
 
-use crate::{
-    Result,
-    feature::Edit,
-    progress::{FRAME, Progress},
-    xlog::Records,
-};
+use crate::{Result, feature::Edit, progress::Progress, xlog::Records};
 
 pub type Symbols = BTreeMap<String, Vec<u64>>;
+
+pub fn assembly(bytes: &[u8], address: u64) -> String {
+    let mut formatter = FastFormatter::new();
+    Decoder::with_ip(64, bytes, address, DecoderOptions::NONE)
+        .into_iter()
+        .map(|instruction| {
+            let mut text = String::new();
+            formatter.format(&instruction, &mut text);
+            text
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
 
 pub struct References {
     functions: Vec<Range<u64>>,
@@ -194,53 +202,144 @@ impl<'a> Image<'a> {
         Ok(addresses)
     }
 
-    pub fn references(&self, name: &str, progress: &Progress) -> Result<References> {
+    pub fn references(
+        &self,
+        name: &str,
+        labels: BTreeMap<u64, String>,
+        progress: &Progress,
+    ) -> Result<References> {
+        let mut exports = BTreeMap::new();
+        for export in self.file.exports()? {
+            let export = export?;
+            if let (NameOrOrdinal::Name(name), ExportTarget::Address { address }) =
+                (export.name(), export.target())
+            {
+                exports.insert(address, String::from_utf8_lossy(name).into_owned());
+            }
+        }
         let functions = self.functions()?;
         let mut entries = Vec::new();
-        let step = progress.start(
-            format!("分析代码引用：{name}"),
-            functions.len() as u64,
-            "个函数",
-        );
-        let mut sample = Instant::now();
-        let mut formatter = FastFormatter::new();
+        let step = progress.start("分析代码引用", functions.len() as u64, "函数");
+        step.detail(name);
         for (index, function) in functions.iter().enumerate() {
             progress.check()?;
             let bytes = self.data(function.start, (function.end - function.start) as usize)?;
             let mut decoder = Decoder::with_ip(64, bytes, function.start, DecoderOptions::NONE);
             let mut instruction = Instruction::default();
-            if sample.elapsed() >= FRAME {
-                let first = decoder.decode();
-                let mut text = String::new();
-                formatter.format(&first, &mut text);
-                step.detail(format!(
-                    "函数 RVA {:#x}\n{text}",
-                    function.start - self.base()
-                ));
-                decoder.set_position(0)?;
-                decoder.set_ip(function.start);
-                sample = Instant::now();
-            }
             while decoder.can_decode() {
                 decoder.decode_out(&mut instruction);
-                if instruction.is_ip_rel_memory_operand() {
-                    entries.push((instruction.ip_rel_memory_address(), index));
-                }
-                if instruction.op0_kind() == OpKind::NearBranch64 {
-                    entries.push((instruction.near_branch_target(), index));
+                let target = if instruction.is_ip_rel_memory_operand() {
+                    instruction.ip_rel_memory_address()
+                } else if instruction.op0_kind() == OpKind::NearBranch64 {
+                    instruction.near_branch_target()
+                } else {
+                    continue;
+                };
+                entries.push((target, index));
+                let symbol = labels.get(&target);
+                let sampled = step.sample();
+                if sampled || symbol.is_some() {
+                    let bytes = self.data(instruction.ip(), instruction.len())?;
+                    let label = exports.get(&function.start).or(symbol);
+                    let mut detail = name.to_owned();
+                    if let Some(symbol) = label {
+                        detail.push_str(&format!("；{symbol}"));
+                    }
+                    detail.push_str(&format!(
+                        "；RVA 0x{:08X}；{} → {}",
+                        instruction.ip() - self.base(),
+                        bytes
+                            .iter()
+                            .map(|byte| format!("{byte:02X}"))
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        assembly(bytes, instruction.ip()),
+                    ));
+                    if let Some(symbol) = symbol.or_else(|| exports.get(&target)) {
+                        if Some(symbol) != label {
+                            detail.push_str(&format!("；{symbol}"));
+                        }
+                    } else if let Some(value) = self.string(target) {
+                        detail.push_str(&format!("；{value:?}"));
+                    }
+                    step.detail(detail);
                 }
             }
             step.set(index as u64 + 1);
         }
-        entries.sort_unstable();
-        entries.dedup();
-        let targets = entries
-            .windows(2)
-            .filter(|pair| pair[0].0 != pair[1].0)
-            .count()
-            + usize::from(!entries.is_empty());
-        step.finish(format!("找到 {targets} 个目标的引用"));
+        step.finish(format!(
+            "{name}；{} 函数；{} 引用",
+            functions.len(),
+            entries.len()
+        ));
+        let step = progress.activity("排序引用索引");
+        let mut comparisons = 0_u64;
+        entries.sort_unstable_by(|left, right| {
+            comparisons += 1;
+            let order = left.cmp(right);
+            if step.sample() {
+                step.detail(format!(
+                    "{name}；{comparisons} 次比较\n\
+                     (0x{:X}, {}) {} (0x{:X}, {})",
+                    left.0,
+                    left.1,
+                    match order {
+                        std::cmp::Ordering::Less => "<",
+                        std::cmp::Ordering::Equal => "=",
+                        std::cmp::Ordering::Greater => ">",
+                    },
+                    right.0,
+                    right.1,
+                ));
+            }
+            order
+        });
+        progress.check()?;
+        step.finish(format!(
+            "{name}；{comparisons} 次比较；{} 引用",
+            entries.len()
+        ));
+        let total = entries.len();
+        let step = progress.start("合并重复引用", total as u64, "引用");
+        let mut processed = usize::from(total != 0);
+        let mut duplicates = 0;
+        let mut targets = processed;
+        entries.dedup_by(|left, right| {
+            processed += 1;
+            targets += usize::from(left.0 != right.0);
+            let equal = left == right;
+            duplicates += usize::from(equal);
+            if step.sample() {
+                step.set(processed as u64);
+                step.detail(format!(
+                    "{name}；(0x{:X}, {})；重复 {duplicates}；目标 {targets}",
+                    left.0, left.1,
+                ));
+            }
+            equal
+        });
+        step.finish(format!(
+            "{name}；{} → {} 引用；{targets} 目标",
+            total,
+            entries.len()
+        ));
         Ok(References { functions, entries })
+    }
+
+    fn string(&self, address: u64) -> Option<&str> {
+        for section in self.file.sections() {
+            let Some(offset) = address.checked_sub(section.address()) else {
+                continue;
+            };
+            let Some(data) = section.data().ok()?.get(offset as usize..) else {
+                continue;
+            };
+            let text = CStr::from_bytes_until_nul(data).ok()?.to_str().ok()?;
+            if text.chars().count() > 1 && text.chars().all(|character| !character.is_control()) {
+                return Some(text);
+            }
+        }
+        None
     }
 
     fn unwind(&self) -> Result<&'a [[u8; 12]]> {

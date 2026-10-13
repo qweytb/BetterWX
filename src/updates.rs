@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use crate::{
     Result,
     feature::{Edit, Feature, Target},
-    image::{Image, References, Symbols},
+    image::{Image, References, Symbols, assembly},
     progress::Progress,
     xlog,
 };
@@ -63,7 +63,7 @@ fn edit(image: &Image<'_>, address: u64, bytes: &[u8]) -> Result<Edit> {
 }
 
 fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
-    let names: Vec<_> = FUNCTIONS.iter().map(|(name, _)| *name).collect();
+    let names: Vec<_> = FUNCTIONS.iter().map(|(name, ..)| *name).collect();
     xlog::find(image, &names, progress)
 }
 
@@ -73,7 +73,7 @@ fn scan(
     references: &References,
     progress: &Progress,
 ) -> Result<Vec<Edit>> {
-    let step = progress.start("定位版本更新函数", FUNCTIONS.len() as u64, "个函数");
+    let step = progress.start("准备更新补丁", FUNCTIONS.len() as u64, "个函数");
     let mut edits = Vec::new();
     for (index, (name, bytes)) in FUNCTIONS.iter().enumerate() {
         progress.check()?;
@@ -86,11 +86,19 @@ fn scan(
         let [address] = functions.into_iter().collect::<Vec<_>>()[..] else {
             return Err(format!("无法唯一定位 {name}").into());
         };
-        step.detail(format!("{name}\nRVA {:#x}", address - image.base()));
+        step.record(format!(
+            "{name}；RVA 0x{:08X}；入口 → {}",
+            address - image.base(),
+            assembly(bytes, address),
+        ));
         edits.push(edit(image, address, bytes)?);
         step.set(index as u64 + 1);
     }
-    step.finish(format!("取得 {} 个函数入口", edits.len()));
+    step.finish(format!(
+        "{} 入口；{} 字节",
+        edits.len(),
+        edits.iter().map(|edit| edit.bytes.len()).sum::<usize>()
+    ));
     Ok(edits)
 }
 
@@ -118,6 +126,10 @@ fn scan_launcher(
     };
     let step = progress.activity("准备启动器补丁");
     let loader = edit(image, address, &[0x31, 0xc0, 0xc3])?;
-    step.finish(format!("更新入口 RVA {:#x}", address - image.base()));
+    step.finish(format!(
+        "Weixin.exe；RVA 0x{:08X}；入口 → {}",
+        address - image.base(),
+        assembly(&loader.bytes, address)
+    ));
     Ok(vec![loader])
 }

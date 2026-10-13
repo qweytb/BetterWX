@@ -181,8 +181,17 @@ pub fn scan(store: &mut Store, progress: &Progress) -> Result<Vec<Prepared>> {
         if found.is_empty() {
             continue;
         }
+        let labels = found
+            .iter()
+            .flat_map(|(_, _, symbols)| symbols)
+            .flat_map(|(name, addresses)| {
+                addresses
+                    .iter()
+                    .map(move |address| (*address, name.trim_end_matches('\0').to_owned()))
+            })
+            .collect();
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        let references = match image.references(&name, progress) {
+        let references = match image.references(&name, labels, progress) {
             Ok(references) => references,
             Err(error) => {
                 for (index, _, _) in found {
@@ -223,8 +232,8 @@ pub fn scan(store: &mut Store, progress: &Progress) -> Result<Vec<Prepared>> {
 pub fn inspect(store: &mut Store, prepared: &[Prepared], progress: &Progress) -> Result<()> {
     for (target, file) in &mut store.files {
         let name = target.file_name().unwrap_or_default().to_string_lossy();
-        let step = progress.activity(format!("识别当前补丁：{name}"));
-        step.detail(store::display(target));
+        let step = progress.start("识别当前补丁", file.current.len() as u64, "字节");
+        step.detail(name.as_ref());
         let mut enabled = BTreeSet::new();
         for patch in prepared {
             progress.check()?;
@@ -247,10 +256,26 @@ pub fn inspect(store: &mut Store, prepared: &[Prepared], progress: &Progress) ->
             }
         }
         let expected = generate(&file.original, &enabled, prepared, target)?;
+        let mut offset = 0;
         let difference = expected
-            .iter()
-            .zip(file.current.iter())
-            .position(|(left, right)| left != right)
+            .chunks(1024 * 1024)
+            .zip(file.current.chunks(1024 * 1024))
+            .find_map(|(expected, current)| {
+                let difference = expected
+                    .iter()
+                    .zip(current)
+                    .position(|(left, right)| left != right);
+                let start = offset;
+                offset += current.len();
+                step.set(offset as u64);
+                if step.sample() {
+                    step.detail(format!(
+                        "{name}；offset 0x{start:08X}；{} 字节",
+                        current.len()
+                    ));
+                }
+                difference.map(|index| start + index)
+            })
             .or_else(|| {
                 (expected.len() != file.current.len())
                     .then_some(expected.len().min(file.current.len()))
@@ -261,7 +286,7 @@ pub fn inspect(store: &mut Store, prepared: &[Prepared], progress: &Progress) ->
                 store::display(target)
             )
         });
-        step.finish(if let Some(issue) = &file.issue {
+        let state = if let Some(issue) = &file.issue {
             issue.clone()
         } else if enabled.is_empty() {
             "原始状态".to_owned()
@@ -272,7 +297,8 @@ pub fn inspect(store: &mut Store, prepared: &[Prepared], progress: &Progress) ->
                 .map(|patch| patch.feature.name)
                 .collect::<Vec<_>>()
                 .join("、")
-        });
+        };
+        step.finish(format!("{name}；{state}"));
         file.enabled = enabled;
     }
     Ok(())

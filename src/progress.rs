@@ -18,12 +18,14 @@ pub struct Step {
     pub total: u64,
     pub unit: &'static str,
     completed: Arc<AtomicU64>,
+    requested: Arc<AtomicBool>,
     text: Arc<Mutex<Text>>,
 }
 
 #[derive(Clone, Default)]
 pub struct Text {
     pub detail: String,
+    pub records: Vec<String>,
     pub result: Option<String>,
 }
 
@@ -38,6 +40,23 @@ impl Step {
 
     pub fn detail(&self, detail: impl Into<String>) {
         self.text.lock().expect("progress lock poisoned").detail = detail.into();
+    }
+
+    pub fn record(&self, detail: impl Into<String>) {
+        self.text
+            .lock()
+            .expect("progress lock poisoned")
+            .records
+            .push(detail.into());
+    }
+
+    pub fn request(&self) {
+        self.requested.store(true, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn sample(&self) -> bool {
+        self.requested.load(Ordering::Relaxed) && self.requested.swap(false, Ordering::Relaxed)
     }
 
     pub fn finish(&self, result: impl Into<String>) {
@@ -72,6 +91,7 @@ impl Progress {
             total,
             unit,
             completed: Arc::default(),
+            requested: Arc::new(AtomicBool::new(true)),
             text: Arc::default(),
         };
         self.steps
@@ -83,6 +103,23 @@ impl Progress {
 
     pub fn activity(&self, name: impl Into<String>) -> Step {
         self.start(name, 0, "")
+    }
+
+    pub fn record(&self, name: &str, item: &str) {
+        let previous = self
+            .steps
+            .lock()
+            .expect("progress lock poisoned")
+            .last()
+            .filter(|step| step.group == self.group && step.name == name)
+            .cloned();
+        let step = previous.unwrap_or_else(|| self.activity(name));
+        let mut result = step.text().result.unwrap_or_default();
+        if !result.is_empty() {
+            result.push('、');
+        }
+        result.push_str(item);
+        step.finish(result);
     }
 
     pub fn steps(&self) -> Vec<Step> {
