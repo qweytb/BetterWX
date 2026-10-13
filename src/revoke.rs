@@ -274,9 +274,10 @@ fn scan(
         })
         .ok_or("找不到消息视图类型")?
         .ip_rel_memory_address();
-    let related = image.references(&[view_type, add_bridge], "消息处理", progress)?;
-    let callers = related.get(&add_bridge).ok_or("找不到入库包装函数的引用")?;
-    if callers.as_slice() != [added_function] {
+    let callers = references
+        .get(add_bridge)
+        .ok_or("找不到入库包装函数的引用")?;
+    if !callers.eq([&added_function]) {
         return Err("入库包装函数还有其他引用".into());
     }
     let bridge = image
@@ -329,6 +330,7 @@ fn scan(
         &message,
         found[UNREAD].start,
         found[REFRESH].start,
+        references,
         progress,
     )?;
     step.finish(format!(
@@ -413,7 +415,9 @@ fn scan(
     edits.extend(view(
         image,
         &shown,
-        related.get(&view_type).ok_or("找不到消息视图类型的引用")?,
+        references
+            .get(view_type)
+            .ok_or("找不到消息视图类型的引用")?,
     )?);
     step.finish("消息排序与图片组处理");
     Ok(edits)
@@ -639,6 +643,7 @@ fn summary(
     message: &Message,
     update: u64,
     refresh: u64,
+    references: &References,
     progress: &Progress,
 ) -> Result<(Vec<Edit>, Range<u64>)> {
     let instructions = image.instructions(function)?;
@@ -699,7 +704,7 @@ fn summary(
         "撤回群信息更新入口",
     )?;
     let removed = compare[2].next_ip()..compare[2].near_branch_target();
-    let (mut edits, cleanup, address) = cleanup(image, function, &removed, progress)?;
+    let (mut edits, cleanup, address) = cleanup(image, function, &removed, references, progress)?;
     let mut branch = CodeAssembler::new(64)?;
     branch.jmp(removed.end)?;
     edits.push(patch(image, compare[0].ip()..removed.start, &mut branch)?);
@@ -736,6 +741,7 @@ fn cleanup(
     image: &Image<'_>,
     function: &Range<u64>,
     removed: &Range<u64>,
+    references: &References,
     progress: &Progress,
 ) -> Result<(Vec<Edit>, Range<u64>, u64)> {
     let unwind = image.unwind_info(function.start)?;
@@ -808,10 +814,8 @@ fn cleanup(
     let cleanup = image
         .function(image.base() + action.1 as u64)?
         .ok_or("找不到摘要清理函数范围")?;
-    if !image
-        .references(&[cleanup.start], "摘要清理函数", progress)?
-        .is_empty()
-    {
+    progress.check()?;
+    if references.get(cleanup.start).is_some() {
         return Err("摘要清理函数还有其他调用".into());
     }
     let mut parent = state as i32;
@@ -930,10 +934,10 @@ fn comparisons(instructions: &[Instruction]) -> Vec<Comparison> {
     found
 }
 
-fn view(
+fn view<'a>(
     image: &Image<'_>,
     instructions: &[Instruction],
-    types: &[Range<u64>],
+    types: impl Iterator<Item = &'a Range<u64>>,
 ) -> Result<Vec<Edit>> {
     let comparisons = comparisons(instructions);
     if comparisons.is_empty() {

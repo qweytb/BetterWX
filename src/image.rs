@@ -1,9 +1,4 @@
-use std::{
-    cell::OnceCell,
-    collections::{BTreeMap, BTreeSet},
-    ops::Range,
-    time::Instant,
-};
+use std::{cell::OnceCell, collections::BTreeMap, ops::Range, time::Instant};
 
 use iced_x86::{
     Decoder, DecoderOptions, FastFormatter, Instruction, OpKind, code_asm::CodeAssembler,
@@ -21,7 +16,23 @@ use crate::{
 };
 
 pub type Symbols = BTreeMap<String, Vec<u64>>;
-pub type References = BTreeMap<u64, Vec<Range<u64>>>;
+
+pub struct References {
+    functions: Vec<Range<u64>>,
+    entries: Vec<(u64, usize)>,
+}
+
+impl References {
+    pub fn get(&self, address: u64) -> Option<impl Iterator<Item = &Range<u64>>> {
+        let start = self.entries.partition_point(|entry| entry.0 < address);
+        let end = start + self.entries[start..].partition_point(|entry| entry.0 == address);
+        (start != end).then(|| {
+            self.entries[start..end]
+                .iter()
+                .map(|entry| &self.functions[entry.1])
+        })
+    }
+}
 
 pub fn functions(
     name: &str,
@@ -30,7 +41,7 @@ pub fn functions(
 ) -> BTreeMap<u64, Range<u64>> {
     symbols[name]
         .iter()
-        .filter_map(|address| references.get(address))
+        .filter_map(|address| references.get(*address))
         .flatten()
         .map(|function| (function.start, function.clone()))
         .collect()
@@ -183,18 +194,9 @@ impl<'a> Image<'a> {
         Ok(addresses)
     }
 
-    pub fn references(
-        &self,
-        addresses: &[u64],
-        name: &str,
-        progress: &Progress,
-    ) -> Result<References> {
-        let mut references = References::new();
-        if addresses.is_empty() {
-            return Ok(references);
-        }
+    pub fn references(&self, name: &str, progress: &Progress) -> Result<References> {
         let functions = self.functions()?;
-        let targets: BTreeSet<_> = addresses.iter().copied().collect();
+        let mut entries = Vec::new();
         let step = progress.start(
             format!("分析代码引用：{name}"),
             functions.len() as u64,
@@ -202,7 +204,7 @@ impl<'a> Image<'a> {
         );
         let mut sample = Instant::now();
         let mut formatter = FastFormatter::new();
-        for (index, function) in functions.into_iter().enumerate() {
+        for (index, function) in functions.iter().enumerate() {
             progress.check()?;
             let bytes = self.data(function.start, (function.end - function.start) as usize)?;
             let mut decoder = Decoder::with_ip(64, bytes, function.start, DecoderOptions::NONE);
@@ -219,32 +221,26 @@ impl<'a> Image<'a> {
                 decoder.set_ip(function.start);
                 sample = Instant::now();
             }
-            let mut found = BTreeSet::new();
             while decoder.can_decode() {
                 decoder.decode_out(&mut instruction);
                 if instruction.is_ip_rel_memory_operand() {
-                    let address = instruction.ip_rel_memory_address();
-                    if targets.contains(&address) {
-                        found.insert(address);
-                    }
+                    entries.push((instruction.ip_rel_memory_address(), index));
                 }
                 if instruction.op0_kind() == OpKind::NearBranch64 {
-                    let address = instruction.near_branch_target();
-                    if targets.contains(&address) {
-                        found.insert(address);
-                    }
+                    entries.push((instruction.near_branch_target(), index));
                 }
-            }
-            for address in found {
-                references
-                    .entry(address)
-                    .or_default()
-                    .push(function.clone());
             }
             step.set(index as u64 + 1);
         }
-        step.finish(format!("找到 {} 个目标的引用", references.len()));
-        Ok(references)
+        entries.sort_unstable();
+        entries.dedup();
+        let targets = entries
+            .windows(2)
+            .filter(|pair| pair[0].0 != pair[1].0)
+            .count()
+            + usize::from(!entries.is_empty());
+        step.finish(format!("找到 {targets} 个目标的引用"));
+        Ok(References { functions, entries })
     }
 
     fn unwind(&self) -> Result<&'a [[u8; 12]]> {

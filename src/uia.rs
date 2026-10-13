@@ -60,7 +60,7 @@ fn locate(
     let mut calls = BTreeSet::new();
     for function in symbols[KEY]
         .iter()
-        .filter_map(|address| references.get(address))
+        .filter_map(|address| references.get(*address))
         .flatten()
     {
         progress.check()?;

@@ -178,15 +178,11 @@ pub fn scan(store: &mut Store, progress: &Progress) -> Result<Vec<Prepared>> {
                 Err(error) => prepared[index].edits = Err(error.to_string()),
             }
         }
-        let addresses: Vec<_> = found
-            .iter()
-            .flat_map(|(_, _, symbols)| symbols.values().flatten())
-            .copied()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        if found.is_empty() {
+            continue;
+        }
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        let references = match image.references(&addresses, &name, progress) {
+        let references = match image.references(&name, progress) {
             Ok(references) => references,
             Err(error) => {
                 for (index, _, _) in found {

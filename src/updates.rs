@@ -79,7 +79,7 @@ fn scan(
         progress.check()?;
         let functions: BTreeSet<_> = symbols[*name]
             .iter()
-            .filter_map(|address| references.get(address))
+            .filter_map(|address| references.get(*address))
             .flatten()
             .map(|function| function.start)
             .collect();
@@ -109,7 +109,7 @@ fn scan_launcher(
 ) -> Result<Vec<Edit>> {
     let functions: BTreeSet<_> = symbols[KEY]
         .iter()
-        .filter_map(|address| references.get(address))
+        .filter_map(|address| references.get(*address))
         .flatten()
         .map(|function| function.start)
         .collect();
