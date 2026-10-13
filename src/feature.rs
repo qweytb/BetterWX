@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    Result,
+    Result, credentials,
     image::{Image, References, Symbols},
     login,
     progress::Progress,
@@ -123,6 +123,7 @@ impl Prepared {
 
 pub const FEATURES: &[Feature] = &[
     login::FEATURE,
+    credentials::FEATURE,
     revoke::FEATURE,
     uia::FEATURE,
     updates::FEATURE,

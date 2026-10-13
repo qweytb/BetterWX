@@ -253,7 +253,7 @@ impl<'a> Image<'a> {
                         == address - self.base()
                 })
                 .count();
-            if header[0] >> 3 != 0 || shared != 1 || unwind.len() > size {
+            if shared != 1 || unwind.len() > size {
                 return Err("原函数的展开信息无法原位改写".into());
             }
             let offset = self.offset(address)?;

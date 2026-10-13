@@ -32,7 +32,7 @@ fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
     xlog::find(image, &[INIT, BUTTON, REQUEST], progress)
 }
 
-fn calls(instructions: &[Instruction]) -> BTreeMap<u64, Vec<u64>> {
+pub fn calls(instructions: &[Instruction]) -> BTreeMap<u64, Vec<u64>> {
     let mut calls: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for pair in instructions.windows(2) {
         if matches!(pair[0].code(), Code::Mov_r64_rm64 | Code::Mov_rm64_r64)

@@ -1,3 +1,4 @@
+mod credentials;
 mod feature;
 mod image;
 mod install;
