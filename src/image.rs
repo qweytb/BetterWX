@@ -7,16 +7,23 @@ use std::{
 };
 
 use iced_x86::{
-    Decoder, DecoderOptions, FastFormatter, Instruction, OpKind, code_asm::CodeAssembler,
+    BlockEncoder, BlockEncoderOptions, Decoder, DecoderOptions, FastFormatter, Instruction,
+    InstructionBlock, OpKind, code_asm::CodeAssembler,
 };
 use object::endian::LittleEndian as LE;
 use object::pe;
-use object::read::pe::PeFile64;
+use object::read::pe::{Import, PeFile64};
 use object::read::{ExportTarget, NameOrOrdinal, Object, ObjectSection};
 
 use crate::{Result, feature::Edit, progress::Progress, xlog::Records};
 
 pub type Symbols = BTreeMap<String, Vec<u64>>;
+
+pub struct ExceptionState {
+    pub instruction: u64,
+    pub offset: usize,
+    pub state: i32,
+}
 
 pub fn assembly(bytes: &[u8], address: u64) -> String {
     format(Decoder::with_ip(64, bytes, address, DecoderOptions::NONE))
@@ -127,6 +134,144 @@ impl<'a> Image<'a> {
 
     pub fn base(&self) -> u64 {
         self.file.relative_address_base()
+    }
+
+    pub fn end(&self) -> u64 {
+        self.base() + u64::from(self.file.nt_headers().optional_header.size_of_image.get(LE))
+    }
+
+    pub fn imports(&self) -> Result<Symbols> {
+        let mut found = Symbols::new();
+        if let Some(table) = self.file.import_table()? {
+            let mut descriptors = table.descriptors()?;
+            while let Some(descriptor) = descriptors.next()? {
+                let lookup = descriptor.original_first_thunk.get(LE);
+                let mut address = self.base() + u64::from(descriptor.first_thunk.get(LE));
+                let mut thunks = table.thunks(if lookup == 0 {
+                    descriptor.first_thunk.get(LE)
+                } else {
+                    lookup
+                })?;
+                while let Some(thunk) = thunks.next::<pe::ImageNtHeaders64>()? {
+                    if let Import::Name(_, name) = table.import::<pe::ImageNtHeaders64>(thunk)? {
+                        found
+                            .entry(std::str::from_utf8(name)?.to_owned())
+                            .or_default()
+                            .push(address);
+                    }
+                    address += 8;
+                }
+            }
+        }
+        if let Some(table) = self.file.delay_load_import_table()? {
+            let mut descriptors = table.descriptors()?;
+            while let Some(descriptor) = descriptors.next()? {
+                if descriptor.attributes.get(LE) & pe::IMAGE_DELAYLOAD_RVA_BASED == 0 {
+                    return Err("延迟导入表使用了无法识别的地址格式".into());
+                }
+                let mut address =
+                    self.base() + u64::from(descriptor.import_address_table_rva.get(LE));
+                let mut thunks = table.thunks(descriptor.import_name_table_rva.get(LE))?;
+                while let Some(thunk) = thunks.next::<pe::ImageNtHeaders64>()? {
+                    if let Import::Name(_, name) = table.import::<pe::ImageNtHeaders64>(thunk)? {
+                        found
+                            .entry(std::str::from_utf8(name)?.to_owned())
+                            .or_default()
+                            .push(address);
+                    }
+                    address += 8;
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    pub fn pointers(&self, address: u64) -> Result<Vec<u64>> {
+        let mut found = Vec::new();
+        for section in self.file.sections() {
+            if !section
+                .pe_section()
+                .characteristics
+                .get(LE)
+                .contains(pe::IMAGE_SCN_MEM_WRITE)
+            {
+                continue;
+            }
+            for (index, bytes) in section.data()?.as_chunks::<8>().0.iter().enumerate() {
+                if u64::from_le_bytes(*bytes) == address {
+                    found.push(section.address() + (index * 8) as u64);
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    pub fn reserve(&self, name: &str, bytes: &[u8], alignment: u64) -> Result<(u64, Vec<Edit>)> {
+        let section = self
+            .file
+            .section_by_name(name)
+            .ok_or_else(|| format!("找不到 {name} 节"))?;
+        let address = (section.address() + section.size()).next_multiple_of(alignment);
+        let end = address
+            .checked_add(bytes.len() as u64)
+            .ok_or("数据长度溢出")?;
+        let limit = self
+            .file
+            .sections()
+            .filter(|next| next.address() > section.address())
+            .map(|next| next.address())
+            .min()
+            .unwrap_or_else(|| self.end());
+        if end > limit {
+            return Err(format!("{name} 节剩余空间不足").into());
+        }
+        let header = section.pe_section();
+        let size = u32::try_from(end - section.address())?;
+        let header_offset = usize::try_from(self.file.dos_header().nt_headers_offset())?
+            + 4
+            + size_of::<pe::ImageFileHeader>()
+            + usize::from(
+                self.file
+                    .nt_headers()
+                    .file_header
+                    .size_of_optional_header
+                    .get(LE),
+            )
+            + (section.index().0 - 1) * size_of::<pe::ImageSectionHeader>();
+        let offset = header_offset + std::mem::offset_of!(pe::ImageSectionHeader, virtual_size);
+        let mut edits = vec![Edit {
+            range: offset..offset + 4,
+            bytes: size.to_le_bytes().to_vec(),
+        }];
+        let initialized = bytes.len().min(
+            header
+                .size_of_raw_data
+                .get(LE)
+                .saturating_sub(u32::try_from(address - section.address())?) as usize,
+        );
+        if bytes[initialized..].iter().any(|byte| *byte != 0) {
+            return Err(format!("{name} 节缺少容纳初始化数据的文件空间").into());
+        }
+        if initialized != 0 {
+            let offset = usize::try_from(
+                u64::from(header.pointer_to_raw_data.get(LE)) + address - section.address(),
+            )?;
+            let original = self
+                .file
+                .data()
+                .get(offset..offset + initialized)
+                .ok_or("节尾数据超出文件范围")?;
+            if original.iter().any(|byte| *byte != 0) {
+                return Err(format!("{name} 节尾存在数据").into());
+            }
+            if original != &bytes[..initialized] {
+                edits.push(Edit {
+                    range: offset..offset + initialized,
+                    bytes: bytes[..initialized].to_vec(),
+                });
+            }
+        }
+        Ok((address, edits))
     }
 
     pub fn sections(&self) -> Result<Vec<(u64, &'a [u8])>> {
@@ -267,10 +412,107 @@ impl<'a> Image<'a> {
         Ok(edits)
     }
 
-    pub fn find(&self, value: &[u8], progress: &Progress) -> Result<Vec<u64>> {
+    pub fn exception_states(&self, address: u64) -> Result<Vec<ExceptionState>> {
+        let unwind = self.unwind_info(address)?;
+        let header = self.data(unwind, 4)?;
+        let flags = header[0] >> 3;
+        if flags & 4 != 0 {
+            return Err("函数使用了链式展开信息".into());
+        }
+        if flags & 3 == 0 {
+            return Ok(Vec::new());
+        }
+        let offset = (4 + usize::from(header[2]) * 2).next_multiple_of(4);
+        let info = self.base()
+            + u64::from(u32::from_le_bytes(
+                self.data(unwind + offset as u64 + 4, 4)?.try_into()?,
+            ));
+        let header = self.data(info, 40)?;
+        if u32::from_le_bytes(header[..4].try_into()?) & 0x1fff_ffff != 0x1993_0522 {
+            return Err("无法识别函数的 C++ 异常状态信息".into());
+        }
+        let count = u32::from_le_bytes(header[20..24].try_into()?) as usize;
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let table = self.base() + u64::from(u32::from_le_bytes(header[24..28].try_into()?));
+        let offset = self.offset(table)?;
+        self.data(table, count.checked_mul(8).ok_or("异常状态表长度溢出")?)?
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                Ok(ExceptionState {
+                    instruction: self.base()
+                        + u64::from(u32::from_le_bytes(entry[..4].try_into()?)),
+                    offset: offset + index * 8,
+                    state: i32::from_le_bytes(entry[4..].try_into()?),
+                })
+            })
+            .collect()
+    }
+
+    pub fn reencode(
+        &self,
+        function: &Range<u64>,
+        instructions: &[Instruction],
+    ) -> Result<Vec<Edit>> {
+        let result = BlockEncoder::encode(
+            64,
+            InstructionBlock::new(instructions, function.start),
+            BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS,
+        )?;
+        let mut bytes = result.code_buffer;
+        let length = usize::try_from(function.end - function.start)?;
+        if bytes.len() > length {
+            return Err("原函数的指令空间不足".into());
+        }
+        let unwind = self.data(self.unwind_info(function.start)?, 4)?;
+        let prologue = usize::from(unwind[1]);
+        if bytes.get(..prologue) != Some(self.data(function.start, prologue)?) {
+            return Err("重排后的函数序言与展开信息不符".into());
+        }
+        let mut locations = BTreeMap::new();
+        for (instruction, offset) in instructions.iter().zip(result.new_instruction_offsets) {
+            if offset == u32::MAX {
+                return Err("指令展开后无法对应原异常状态".into());
+            }
+            if locations
+                .insert(instruction.ip(), function.start + u64::from(offset))
+                .is_some()
+            {
+                return Err("待重排指令的位置重复".into());
+            }
+        }
+        locations.insert(function.end, function.start + bytes.len() as u64);
+        bytes.resize(length, 0xcc);
+        let offset = self.offset(function.start)?;
+        let mut edits = vec![Edit {
+            range: offset..offset + length,
+            bytes,
+        }];
+        for state in self.exception_states(function.start)? {
+            if !function.contains(&state.instruction) && state.instruction != function.end {
+                continue;
+            }
+            let address = *locations
+                .get(&state.instruction)
+                .ok_or("找不到异常状态对应的指令")?;
+            if address != state.instruction {
+                edits.push(Edit {
+                    range: state.offset..state.offset + 4,
+                    bytes: u32::try_from(address - self.base())?.to_le_bytes().to_vec(),
+                });
+            }
+        }
+        Ok(edits)
+    }
+
+    pub fn find(&self, name: &str, value: &[u8], progress: &Progress) -> Result<Vec<u64>> {
         let sections = self.sections()?;
         let step = progress.activity("查找配置字符串");
-        let target = String::from_utf8_lossy(value.strip_suffix(&[0]).unwrap_or(value));
+        let target = name.trim_end_matches('\0');
         step.detail(target.to_string());
         let mut addresses = Vec::new();
         for (address, data) in sections {

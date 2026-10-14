@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    Result, credentials,
+    Result, coexist, credentials,
     image::{Image, References, Symbols},
     login,
     progress::Progress,
@@ -127,6 +127,7 @@ pub const FEATURES: &[Feature] = &[
     revoke::FEATURE,
     uia::FEATURE,
     updates::FEATURE,
+    coexist::FEATURE,
 ];
 
 pub fn targets(target: &Path) -> Result<Vec<PathBuf>> {

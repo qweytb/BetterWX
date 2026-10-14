@@ -1,3 +1,4 @@
+mod coexist;
 mod credentials;
 mod feature;
 mod image;
@@ -28,6 +29,7 @@ BetterWX
   betterwx status [Weixin.dll]
   betterwx enable <功能> [Weixin.dll]
   betterwx disable <功能> [Weixin.dll]
+  betterwx coexist <create|remove> <字母> [Weixin.dll]
   betterwx restore [Weixin.dll]
 
 无参数启动时进入交互界面。
@@ -51,12 +53,25 @@ fn run() -> Result<()> {
         return Ok(());
     }
     let command = command.to_str().ok_or("命令必须为文字")?;
+    let mut entry = None;
+    let mut remove = false;
     let feature = match command {
         "enable" | "disable" => {
             let argument = arguments.next().ok_or("需要指定功能名称")?;
             Some(feature::find(
                 argument.to_str().ok_or("功能名称必须为文字")?,
             )?)
+        }
+        "coexist" => {
+            let operation = arguments.next().ok_or("需要指定 create 或 remove")?;
+            remove = match operation.to_str().ok_or("操作名称必须为文字")? {
+                "create" => false,
+                "remove" => true,
+                operation => return Err(format!("未知共存操作：{operation}").into()),
+            };
+            let name = arguments.next().ok_or("需要指定入口字母")?;
+            entry = Some(coexist::letter(name.to_str().ok_or("入口名称必须为文字")?)?);
+            Some(feature::find(coexist::FEATURE.id)?)
         }
         "status" | "restore" => None,
         _ => return Err(format!("未知命令：{command}").into()),
@@ -73,6 +88,13 @@ fn run() -> Result<()> {
             .ok_or("安装目录中找不到微信版本")?,
     };
     let progress = Progress::default();
+    if remove {
+        let directory = coexist::directory(&path.canonicalize()?)?;
+        let entry = directory.join(entry.ok_or("缺少入口字母")?.to_string());
+        coexist::remove(&entry, &progress)?;
+        println!("已删除入口：{}", store::display(&entry));
+        return Ok(());
+    }
     let mut store = Store::open(&path, &progress)?;
     let mut prepared = Vec::new();
     if command != "restore" {
@@ -96,7 +118,7 @@ fn run() -> Result<()> {
                 );
             }
         }
-        "enable" | "disable" => {
+        "enable" | "disable" | "coexist" => {
             let feature = feature.ok_or("缺少功能名称")?;
             let patch = prepared
                 .iter()
@@ -104,6 +126,18 @@ fn run() -> Result<()> {
                 .ok_or("找不到功能分析结果")?;
             if let Some(issue) = patch.issue(&store) {
                 return Err(issue.clone().into());
+            }
+            if let Some(letter) = entry {
+                if patch.state(&store) != feature::State::Enabled {
+                    return Err("启用所选版本的共存支持后可创建入口".into());
+                }
+                let path = coexist::directory(&store.target)?.join(letter.to_string());
+                if coexist::exists(&path)? {
+                    return Err(format!("{} 已存在", store::display(&path)).into());
+                }
+                coexist::create(&path, &progress)?;
+                println!("入口：{}", store::display(&path.join("Weixin.exe")));
+                return Ok(());
             }
             let enable = command == "enable";
             let requested = if enable {
@@ -120,11 +154,7 @@ fn run() -> Result<()> {
             println!(
                 "{}：{}",
                 feature.name,
-                if command == "enable" {
-                    "已启用"
-                } else {
-                    "已关闭"
-                }
+                if enable { "已启用" } else { "已关闭" }
             );
         }
         "restore" => {

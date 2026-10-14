@@ -84,7 +84,7 @@ fn scan(symbols: Symbols) -> Box<dyn Analysis> {
 fn find_launcher(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
     Ok(Symbols::from([(
         KEY.to_owned(),
-        image.find(KEY.as_bytes(), progress)?,
+        image.find(KEY, KEY.as_bytes(), progress)?,
     )]))
 }
 

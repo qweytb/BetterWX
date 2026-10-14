@@ -23,7 +23,7 @@ pub const FEATURE: Feature = Feature {
 };
 
 fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
-    let keys = image.find(KEY.as_bytes(), progress)?;
+    let keys = image.find(KEY, KEY.as_bytes(), progress)?;
     if keys.is_empty() {
         return Err("找不到无障碍配置键".into());
     }

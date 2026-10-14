@@ -511,6 +511,209 @@ fn version(path: &Path) -> String {
         .into_owned()
 }
 
+fn apply(
+    store: &mut Store,
+    prepared: &[feature::Prepared],
+    change: Option<(&feature::Prepared, bool)>,
+    terminate: bool,
+    progress: &Progress,
+) -> Result<()> {
+    let targets = match change {
+        Some((patch, enable)) => patch.targets(store, enable)?,
+        None => store.changed(),
+    };
+    if targets.is_empty() {
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    let _ = terminate;
+    #[cfg(windows)]
+    if terminate {
+        let step = progress.activity("查询占用进程");
+        step.detail(
+            targets
+                .iter()
+                .map(|path| store::display(path))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let processes = crate::process::using(&targets)?;
+        step.finish(
+            processes
+                .iter()
+                .map(|process| process.description())
+                .collect::<Vec<_>>()
+                .join("、"),
+        );
+        for process in processes {
+            progress.check()?;
+            process.terminate(progress)?;
+        }
+    }
+    let step = progress.activity("准备文件内容");
+    let contents = match change {
+        Some((patch, enable)) => {
+            let contents = feature::change(store, patch, enable, prepared)?;
+            step.finish(format!(
+                "{}；{}",
+                patch.feature.name,
+                if enable { "开启" } else { "关闭" }
+            ));
+            contents
+        }
+        None => {
+            let contents = store.originals();
+            step.finish("恢复原始内容");
+            contents
+        }
+    };
+    feature::describe(store, &contents, prepared, progress)?;
+    store.save(contents, progress)
+}
+
+fn coexist(
+    screen: &mut Screen,
+    store: &mut Store,
+    prepared: &[feature::Prepared],
+    patch: &feature::Prepared,
+) -> Result<()> {
+    let directory = crate::coexist::directory(&store.target)?;
+    let detail = format!(" -- {}", version(&store.target));
+    let mut selected = 0;
+    let mut pending = false;
+    let mut notice = String::new();
+    loop {
+        let enabled = patch.state(store) == feature::State::Enabled;
+        let error = patch.issue(store);
+        let mut items = vec![Item {
+            marker: if enabled { "■" } else { "□" },
+            label: if error.is_some() || pending {
+                "共存支持".to_owned().red()
+            } else {
+                style("共存支持".to_owned())
+            },
+            value: if pending {
+                format!("结束占用进程并{}", if enabled { "关闭" } else { "开启" })
+            } else if error.is_some() {
+                "不可用".to_owned()
+            } else if enabled {
+                "已启用".to_owned()
+            } else {
+                "未启用".to_owned()
+            },
+            detail: error
+                .cloned()
+                .unwrap_or_else(|| "各字母入口分别保存登录信息".to_owned()),
+        }];
+        if enabled {
+            for letter in (b'A'..=b'Z').map(char::from) {
+                let path = directory.join(letter.to_string());
+                let state = crate::coexist::exists(&path);
+                let exists = state.as_ref().is_ok_and(|exists| *exists);
+                items.push(Item {
+                    marker: if exists { "■" } else { "□" },
+                    label: if state.is_err() {
+                        letter.to_string().red()
+                    } else {
+                        style(letter.to_string())
+                    },
+                    value: if state.is_err() {
+                        "不可用".to_owned()
+                    } else if exists {
+                        "已创建".to_owned()
+                    } else {
+                        "未创建".to_owned()
+                    },
+                    detail: state.err().map_or_else(
+                        || store::display(&path.join("Weixin.exe")),
+                        |error| error.to_string(),
+                    ),
+                });
+            }
+        }
+        items.push(Item::action(style("返回")));
+        if !screen.select(
+            "共存",
+            &detail,
+            &items,
+            &mut selected,
+            &notice,
+            "方向键 选择\n回车键 切换\nEsc 返回",
+        )? || selected == items.len() - 1
+        {
+            return Ok(());
+        }
+        if selected == 0 {
+            if let Some(error) = patch.issue(store) {
+                notice = error.clone();
+                continue;
+            }
+            let targets = patch.targets(store, !enabled)?;
+            let error = store.write_error(&targets);
+            let terminate = error.is_some() && pending;
+            if let Some(error) = error
+                && !terminate
+            {
+                notice = error;
+                #[cfg(windows)]
+                {
+                    pending = true;
+                }
+                continue;
+            }
+            pending = false;
+            notice = match screen.work("写入", &detail, |progress| {
+                apply(
+                    store,
+                    prepared,
+                    Some((patch, !enabled)),
+                    terminate,
+                    progress,
+                )
+            }) {
+                Ok(_) => String::new(),
+                Err(error) => error.to_string(),
+            };
+            if screen.exiting {
+                return Ok(());
+            }
+            continue;
+        }
+        pending = false;
+        let letter = char::from(b'A' + selected as u8 - 1);
+        let path = directory.join(letter.to_string());
+        let exists = match crate::coexist::exists(&path) {
+            Ok(exists) => exists,
+            Err(error) => {
+                notice = error.to_string();
+                continue;
+            }
+        };
+        let result = screen.work(
+            if exists {
+                "删除共存入口"
+            } else {
+                "创建共存入口"
+            },
+            &detail,
+            |progress| {
+                if exists {
+                    crate::coexist::remove(&path, progress)
+                } else {
+                    crate::coexist::create(&path, progress)
+                }
+            },
+        );
+        notice = match result {
+            Ok(_) => String::new(),
+            Err(error) => error.to_string(),
+        };
+        if screen.exiting {
+            return Ok(());
+        }
+    }
+}
+
 fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
     let detail = format!(" -- {}", version(path));
     let Some((mut store, prepared)) = screen.work("分析", &detail, |progress| {
@@ -530,6 +733,11 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
             .iter()
             .enumerate()
             .map(|(index, patch)| {
+                if patch.feature.id == crate::coexist::FEATURE.id {
+                    let mut item = Item::action(style(patch.feature.name));
+                    item.detail = patch.feature.description.to_owned();
+                    return item;
+                }
                 let error = patch.issue(&store);
                 let state = patch.state(&store);
                 let label = patch.feature.name.to_owned();
@@ -587,6 +795,17 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
             return Ok(());
         };
         let change = if let Some(patch) = prepared.get(selected) {
+            if patch.feature.id == crate::coexist::FEATURE.id {
+                pending = None;
+                notice = match coexist(screen, &mut store, &prepared, patch) {
+                    Ok(()) => String::new(),
+                    Err(error) => error.to_string(),
+                };
+                if screen.exiting {
+                    return Ok(());
+                }
+                continue;
+            }
             if let Some(error) = patch.issue(&store) {
                 notice = error.clone();
                 continue;
@@ -619,48 +838,7 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
         }
         pending = None;
         let result = screen.work("写入", &detail, |progress| {
-            #[cfg(windows)]
-            if terminate {
-                let step = progress.activity("查询占用进程");
-                step.detail(
-                    targets
-                        .iter()
-                        .map(|path| store::display(path))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                );
-                let processes = crate::process::using(&targets)?;
-                step.finish(
-                    processes
-                        .iter()
-                        .map(|process| process.description())
-                        .collect::<Vec<_>>()
-                        .join("、"),
-                );
-                for process in processes {
-                    progress.check()?;
-                    process.terminate(progress)?;
-                }
-            }
-            let step = progress.activity("准备文件内容");
-            let contents = match change {
-                Some((patch, enable)) => {
-                    let contents = feature::change(&store, patch, enable, &prepared)?;
-                    step.finish(format!(
-                        "{}；{}",
-                        patch.feature.name,
-                        if enable { "开启" } else { "关闭" }
-                    ));
-                    contents
-                }
-                None => {
-                    let contents = store.originals();
-                    step.finish("恢复原始内容");
-                    contents
-                }
-            };
-            feature::describe(&store, &contents, &prepared, progress)?;
-            store.save(contents, progress)
+            apply(&mut store, &prepared, change, terminate, progress)
         });
         notice = match result {
             Ok(_) => String::new(),
