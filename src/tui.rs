@@ -339,6 +339,34 @@ impl Screen {
         })
     }
 
+    fn change(
+        &mut self,
+        store: &mut Store,
+        prepared: &[feature::Prepared],
+        change: Option<(&feature::Prepared, bool)>,
+        pending: bool,
+    ) -> Result<(bool, String)> {
+        let targets = match change {
+            Some((patch, enable)) => patch.targets(store, enable)?,
+            None => store.changed(),
+        };
+        let error = store.write_error(&targets);
+        let terminate = error.is_some() && pending;
+        if let Some(error) = error
+            && !terminate
+        {
+            return Ok((cfg!(windows), error));
+        }
+        let detail = format!(" -- {}", version(&store.target));
+        let notice = match self.work("写入", &detail, |progress| {
+            apply(store, prepared, change, terminate, progress)
+        }) {
+            Ok(_) => String::new(),
+            Err(error) => error.to_string(),
+        };
+        Ok((false, notice))
+    }
+
     fn about(&mut self) -> Result<()> {
         self.draw("关于", Vec::new(), None)?;
         execute!(self.output, MoveTo(0, 2))?;
@@ -522,9 +550,6 @@ fn apply(
         Some((patch, enable)) => patch.targets(store, enable)?,
         None => store.changed(),
     };
-    if targets.is_empty() {
-        return Ok(());
-    }
     #[cfg(not(windows))]
     let _ = terminate;
     #[cfg(windows)]
@@ -553,7 +578,7 @@ fn apply(
     let step = progress.activity("准备文件内容");
     let contents = match change {
         Some((patch, enable)) => {
-            let contents = feature::change(store, patch, enable, prepared)?;
+            let contents = feature::change(store, patch, enable, prepared, progress)?;
             step.finish(format!(
                 "{}；{}",
                 patch.feature.name,
@@ -568,7 +593,12 @@ fn apply(
         }
     };
     feature::describe(store, &contents, prepared, progress)?;
-    store.save(contents, progress)
+    store.save(contents, progress)?;
+    if change.is_none_or(|(patch, enable)| patch.feature.id == crate::sound::FEATURE.id && !enable)
+    {
+        crate::sound::cleanup(store, prepared, progress)?;
+    }
+    Ok(())
 }
 
 fn coexist(
@@ -648,32 +678,7 @@ fn coexist(
                 notice = error.clone();
                 continue;
             }
-            let targets = patch.targets(store, !enabled)?;
-            let error = store.write_error(&targets);
-            let terminate = error.is_some() && pending;
-            if let Some(error) = error
-                && !terminate
-            {
-                notice = error;
-                #[cfg(windows)]
-                {
-                    pending = true;
-                }
-                continue;
-            }
-            pending = false;
-            notice = match screen.work("写入", &detail, |progress| {
-                apply(
-                    store,
-                    prepared,
-                    Some((patch, !enabled)),
-                    terminate,
-                    progress,
-                )
-            }) {
-                Ok(_) => String::new(),
-                Err(error) => error.to_string(),
-            };
+            (pending, notice) = screen.change(store, prepared, Some((patch, !enabled)), pending)?;
             if screen.exiting {
                 return Ok(());
             }
@@ -714,6 +719,132 @@ fn coexist(
     }
 }
 
+fn sound(
+    screen: &mut Screen,
+    store: &Store,
+    patch: &feature::Prepared,
+    sound: &crate::sound::Sound,
+) -> Result<()> {
+    let path = sound.path(&store.target)?;
+    let detail = format!(" -- {}", version(&store.target));
+    let mut selected = 0;
+    let mut notice = String::new();
+    loop {
+        let description = format!("{}\n重启微信后生效", store::display(&path));
+        let mut replace = Item::action(style("替换文件…"));
+        replace.detail = description.clone();
+        let mut restore = Item::action(style("恢复默认"));
+        restore.detail = description;
+        let items = [replace, restore, Item::action(style("返回"))];
+        if !screen.select(
+            sound.name,
+            &detail,
+            &items,
+            &mut selected,
+            &notice,
+            "方向键 选择\n回车键 确定\nEsc 返回",
+        )? || selected == items.len() - 1
+        {
+            return Ok(());
+        }
+        let file = if selected == 0 {
+            match crate::sound::pick(sound) {
+                Ok(Some(path)) => Some(path),
+                Ok(None) => continue,
+                Err(error) => {
+                    notice = error.to_string();
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        notice = match screen.work(sound.name, &detail, |progress| match selected {
+            0 => sound.import(store, file.as_deref().ok_or("缺少音频文件")?, progress),
+            1 => sound.restore(store, patch, progress),
+            _ => unreachable!(),
+        }) {
+            Ok(_) => String::new(),
+            Err(error) => error.to_string(),
+        };
+        if screen.exiting {
+            return Ok(());
+        }
+    }
+}
+
+fn sounds(
+    screen: &mut Screen,
+    store: &mut Store,
+    prepared: &[feature::Prepared],
+    patch: &feature::Prepared,
+) -> Result<()> {
+    let detail = format!(" -- {}", version(&store.target));
+    let mut selected = 0;
+    let mut pending = false;
+    let mut notice = String::new();
+    loop {
+        let enabled = patch.state(store) == feature::State::Enabled;
+        let error = patch.issue(store);
+        let mut items = vec![Item {
+            marker: if enabled { "■" } else { "□" },
+            label: if error.is_some() || pending {
+                patch.feature.name.to_owned().red()
+            } else {
+                style(patch.feature.name.to_owned())
+            },
+            value: if pending {
+                format!("结束占用进程并{}", if enabled { "关闭" } else { "开启" })
+            } else if error.is_some() {
+                "不可用".to_owned()
+            } else if enabled {
+                "已启用".to_owned()
+            } else {
+                "未启用".to_owned()
+            },
+            detail: error
+                .cloned()
+                .unwrap_or_else(|| "使用自定义声音文件".to_owned()),
+        }];
+        for sound in crate::sound::SOUNDS {
+            let mut item = Item::action(style(sound.name));
+            item.detail = store::display(&sound.path(&store.target)?);
+            items.push(item);
+        }
+        items.push(Item::action(style("返回")));
+        if !screen.select(
+            "提示音",
+            &detail,
+            &items,
+            &mut selected,
+            &notice,
+            "方向键 选择\n回车键 确定\nEsc 返回",
+        )? || selected == items.len() - 1
+        {
+            return Ok(());
+        }
+        if selected != 0 {
+            pending = false;
+            notice = match sound(screen, store, patch, &crate::sound::SOUNDS[selected - 1]) {
+                Ok(()) => String::new(),
+                Err(error) => error.to_string(),
+            };
+            if screen.exiting {
+                return Ok(());
+            }
+            continue;
+        }
+        if let Some(error) = patch.issue(store) {
+            notice = error.clone();
+            continue;
+        }
+        (pending, notice) = screen.change(store, prepared, Some((patch, !enabled)), pending)?;
+        if screen.exiting {
+            return Ok(());
+        }
+    }
+}
+
 fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
     let detail = format!(" -- {}", version(path));
     let Some((mut store, prepared)) = screen.work("分析", &detail, |progress| {
@@ -733,7 +864,9 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
             .iter()
             .enumerate()
             .map(|(index, patch)| {
-                if patch.feature.id == crate::coexist::FEATURE.id {
+                if [crate::coexist::FEATURE.id, crate::sound::FEATURE.id]
+                    .contains(&patch.feature.id)
+                {
                     let mut item = Item::action(style(patch.feature.name));
                     item.detail = patch.feature.description.to_owned();
                     return item;
@@ -795,9 +928,14 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
             return Ok(());
         };
         let change = if let Some(patch) = prepared.get(selected) {
-            if patch.feature.id == crate::coexist::FEATURE.id {
+            if [crate::coexist::FEATURE.id, crate::sound::FEATURE.id].contains(&patch.feature.id) {
                 pending = None;
-                notice = match coexist(screen, &mut store, &prepared, patch) {
+                let result = if patch.feature.id == crate::coexist::FEATURE.id {
+                    coexist(screen, &mut store, &prepared, patch)
+                } else {
+                    sounds(screen, &mut store, &prepared, patch)
+                };
+                notice = match result {
                     Ok(()) => String::new(),
                     Err(error) => error.to_string(),
                 };
@@ -816,34 +954,10 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
         } else {
             return Ok(());
         };
-        let targets = match change {
-            Some((patch, enable)) => patch.targets(&store, enable)?,
-            None => store.changed(),
-        };
-        if targets.is_empty() {
-            notice.clear();
-            continue;
-        }
-        let error = store.write_error(&targets);
-        let terminate = error.is_some() && pending == Some(selected);
-        if let Some(error) = error
-            && !terminate
-        {
-            notice = error;
-            #[cfg(windows)]
-            {
-                pending = Some(selected);
-            }
-            continue;
-        }
-        pending = None;
-        let result = screen.work("写入", &detail, |progress| {
-            apply(&mut store, &prepared, change, terminate, progress)
-        });
-        notice = match result {
-            Ok(_) => String::new(),
-            Err(error) => error.to_string(),
-        };
+        let (retry, message) =
+            screen.change(&mut store, &prepared, change, pending == Some(selected))?;
+        pending = retry.then_some(selected);
+        notice = message;
         if screen.exiting {
             return Ok(());
         }

@@ -9,12 +9,13 @@ use crate::{
     image::{Image, References, Symbols},
     login,
     progress::Progress,
-    revoke,
+    revoke, sound,
     store::{self, Content, Store},
     uia, updates,
 };
 
 pub type Edits = BTreeMap<PathBuf, Vec<Edit>>;
+pub type Resources = BTreeMap<String, Range<usize>>;
 
 pub struct Feature {
     pub id: &'static str,
@@ -30,6 +31,10 @@ pub struct Target {
 }
 
 pub trait Analysis {
+    fn resources(&self) -> Resources {
+        Resources::new()
+    }
+
     fn visit(
         &mut self,
         image: &Image<'_>,
@@ -63,6 +68,7 @@ pub struct Edit {
 pub struct Prepared {
     pub feature: &'static Feature,
     pub edits: std::result::Result<Edits, String>,
+    pub resources: BTreeMap<PathBuf, Resources>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -127,6 +133,7 @@ pub const FEATURES: &[Feature] = &[
     revoke::FEATURE,
     uia::FEATURE,
     updates::FEATURE,
+    sound::FEATURE,
     coexist::FEATURE,
 ];
 
@@ -149,15 +156,24 @@ pub fn find(id: &str) -> Result<&'static Feature> {
 }
 
 pub fn scan(store: &mut Store, progress: &Progress) -> Result<Vec<Prepared>> {
-    let mut prepared: Vec<_> = FEATURES
+    analyze(store, FEATURES, progress)
+}
+
+pub fn analyze(
+    store: &mut Store,
+    features: &'static [Feature],
+    progress: &Progress,
+) -> Result<Vec<Prepared>> {
+    let mut prepared: Vec<_> = features
         .iter()
         .map(|feature| Prepared {
             feature,
             edits: Ok(Edits::new()),
+            resources: BTreeMap::new(),
         })
         .collect();
     let mut files: BTreeMap<PathBuf, Vec<(usize, &Target)>> = BTreeMap::new();
-    for (index, feature) in FEATURES.iter().enumerate() {
+    for (index, feature) in features.iter().enumerate() {
         for target in feature.targets {
             progress.check()?;
             let path = target.path(&store.target)?;
@@ -234,7 +250,7 @@ pub fn scan(store: &mut Store, progress: &Progress) -> Result<Vec<Prepared>> {
                     if prepared[*index].edits.is_err() {
                         continue;
                     }
-                    let progress = progress.group(FEATURES[*index].name);
+                    let progress = progress.group(features[*index].name);
                     match analysis.visit(&image, function, references, &progress) {
                         Ok(edits) => {
                             if let Ok(changes) = &mut prepared[*index].edits {
@@ -264,11 +280,15 @@ pub fn scan(store: &mut Store, progress: &Progress) -> Result<Vec<Prepared>> {
             if prepared[index].edits.is_err() {
                 continue;
             }
-            let progress = progress.group(FEATURES[index].name);
+            let progress = progress.group(features[index].name);
+            let resources = analysis.resources();
             match analysis.finish(&image, &references, &progress) {
                 Ok(edits) => {
                     if let Ok(changes) = &mut prepared[index].edits {
                         changes.entry(path.clone()).or_default().extend(edits);
+                    }
+                    if !resources.is_empty() {
+                        prepared[index].resources.insert(path.clone(), resources);
                     }
                 }
                 Err(error) => {
@@ -362,9 +382,13 @@ pub fn change(
     patch: &Prepared,
     enable: bool,
     prepared: &[Prepared],
+    progress: &Progress,
 ) -> Result<BTreeMap<PathBuf, Content>> {
     if let Some(issue) = patch.issue(store) {
         return Err(issue.clone().into());
+    }
+    if enable && patch.feature.id == sound::FEATURE.id {
+        sound::initialize(store, patch, progress)?;
     }
     let mut contents = BTreeMap::new();
     for target in patch.targets(store, enable)? {

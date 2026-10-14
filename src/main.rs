@@ -8,6 +8,7 @@ mod login;
 mod process;
 mod progress;
 mod revoke;
+mod sound;
 mod store;
 mod tui;
 mod uia;
@@ -30,6 +31,8 @@ BetterWX
   betterwx enable <功能> [Weixin.dll]
   betterwx disable <功能> [Weixin.dll]
   betterwx coexist <create|remove> <字母> [Weixin.dll]
+  betterwx sound import <提示音> <音频文件> [Weixin.dll]
+  betterwx sound restore <提示音> [Weixin.dll]
   betterwx restore [Weixin.dll]
 
 无参数启动时进入交互界面。
@@ -46,6 +49,10 @@ fn run() -> Result<()> {
         for feature in feature::FEATURES {
             println!("{}：{}", feature.id, feature.name);
         }
+        println!("\n提示音类型：");
+        for sound in sound::SOUNDS {
+            println!("{}：{}", sound.id, sound.name);
+        }
         return Ok(());
     }
     if command == "--version" {
@@ -55,6 +62,7 @@ fn run() -> Result<()> {
     let command = command.to_str().ok_or("命令必须为文字")?;
     let mut entry = None;
     let mut remove = false;
+    let mut audio = None;
     let feature = match command {
         "enable" | "disable" => {
             let argument = arguments.next().ok_or("需要指定功能名称")?;
@@ -72,6 +80,19 @@ fn run() -> Result<()> {
             let name = arguments.next().ok_or("需要指定入口字母")?;
             entry = Some(coexist::letter(name.to_str().ok_or("入口名称必须为文字")?)?);
             Some(feature::find(coexist::FEATURE.id)?)
+        }
+        "sound" => {
+            let operation = arguments.next().ok_or("需要指定 import 或 restore")?;
+            let operation = operation.to_str().ok_or("操作名称必须为文字")?.to_owned();
+            let name = arguments.next().ok_or("需要指定提示音类型")?;
+            let sound = sound::get(name.to_str().ok_or("提示音类型必须为文字")?)?;
+            let file = match operation.as_str() {
+                "import" => Some(PathBuf::from(arguments.next().ok_or("需要指定音频文件")?)),
+                "restore" => None,
+                _ => return Err(format!("未知提示音操作：{operation}").into()),
+            };
+            audio = Some((operation, sound, file));
+            Some(feature::find(sound::FEATURE.id)?)
         }
         "status" | "restore" => None,
         _ => return Err(format!("未知命令：{command}").into()),
@@ -118,6 +139,25 @@ fn run() -> Result<()> {
                 );
             }
         }
+        "sound" => {
+            let (operation, sound, file) = audio.ok_or("缺少提示音操作")?;
+            let patch = prepared
+                .iter()
+                .find(|patch| patch.feature.id == sound::FEATURE.id)
+                .ok_or("找不到提示音分析结果")?;
+            let message = match operation.as_str() {
+                "import" => {
+                    sound.import(&store, &file.ok_or("缺少音频文件")?, &progress)?;
+                    "已替换"
+                }
+                "restore" => {
+                    sound.restore(&store, patch, &progress)?;
+                    "已恢复"
+                }
+                _ => unreachable!(),
+            };
+            println!("{}：{message}", sound.name);
+        }
         "enable" | "disable" | "coexist" => {
             let feature = feature.ok_or("缺少功能名称")?;
             let patch = prepared
@@ -145,25 +185,34 @@ fn run() -> Result<()> {
             } else {
                 feature::State::Disabled
             };
-            if patch.state(&store) == requested {
-                println!("当前状态已符合请求");
-                return Ok(());
-            }
-            let contents = feature::change(&store, patch, enable, &prepared)?;
+            let changed = patch.state(&store) != requested;
+            let contents = feature::change(&store, patch, enable, &prepared, &progress)?;
             store.save(contents, &progress)?;
-            println!(
-                "{}：{}",
-                feature.name,
-                if enable { "已启用" } else { "已关闭" }
-            );
+            if feature.id == sound::FEATURE.id && !enable {
+                sound::cleanup(&mut store, &prepared, &progress)?;
+            }
+            if changed {
+                println!(
+                    "{}：{}",
+                    feature.name,
+                    if enable { "已启用" } else { "已关闭" }
+                );
+            } else {
+                println!("当前状态已符合请求");
+            }
         }
         "restore" => {
-            if store.changed().is_empty() {
-                println!("文件处于原始状态");
-                return Ok(());
-            }
+            let changed = !store.changed().is_empty();
             store.save(store.originals(), &progress)?;
-            println!("已恢复原始文件");
+            sound::cleanup(&mut store, &prepared, &progress)?;
+            println!(
+                "{}",
+                if changed {
+                    "已恢复原始文件"
+                } else {
+                    "文件处于原始状态"
+                }
+            );
         }
         _ => unreachable!(),
     }

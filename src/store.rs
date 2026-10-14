@@ -61,7 +61,7 @@ fn read(path: &Path, progress: &Progress, name: &str) -> Result<Vec<u8>> {
     Ok(data)
 }
 
-fn write(path: &Path, data: &[u8], progress: &Progress) -> Result<()> {
+pub fn write(path: &Path, data: &[u8], progress: &Progress) -> Result<()> {
     let parent = path.parent().ok_or("目标文件缺少父目录")?;
     let mut temporary = NamedTempFile::new_in(parent)?;
     let name = path.file_name().unwrap_or_default().to_string_lossy();
