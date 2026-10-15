@@ -4,6 +4,7 @@ mod feature;
 mod image;
 mod install;
 mod login;
+mod notify;
 #[cfg(windows)]
 mod process;
 mod progress;
@@ -37,6 +38,7 @@ BetterWX
 
 无参数启动时进入交互界面。
 省略路径时，读取微信安装目录中的最新版本。
+系统通知头像模式：square 方形、circle 圆形。
 restore：恢复保存的原始文件。";
 
 fn run() -> Result<()> {

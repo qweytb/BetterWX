@@ -378,7 +378,12 @@ impl<'a> Image<'a> {
         let mut bytes = code.assemble(function.start)?;
         let size = usize::try_from(function.end - function.start)?;
         if bytes.len() > size {
-            return Err("原函数的指令空间不足".into());
+            return Err(format!(
+                "RVA {:#x} 的指令空间不足：需要 {} 字节，可用 {size} 字节",
+                function.start - self.base(),
+                bytes.len(),
+            )
+            .into());
         }
         bytes.resize(size, 0xcc);
         let offset = self.offset(function.start)?;
@@ -511,7 +516,7 @@ impl<'a> Image<'a> {
 
     pub fn find(&self, name: &str, value: &[u8], progress: &Progress) -> Result<Vec<u64>> {
         let sections = self.sections()?;
-        let step = progress.activity("查找配置字符串");
+        let step = progress.activity("查找字符串");
         let target = name.trim_end_matches('\0');
         step.detail(target.to_string());
         let mut addresses = Vec::new();

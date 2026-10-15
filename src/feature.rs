@@ -7,7 +7,7 @@ use std::{
 use crate::{
     Result, coexist, credentials,
     image::{Image, References, Symbols},
-    login,
+    login, notify,
     progress::Progress,
     revoke, sound,
     store::{self, Content, Store},
@@ -163,6 +163,7 @@ pub const FEATURES: &[Feature] = &[
     login::FEATURE,
     credentials::FEATURE,
     revoke::FEATURE,
+    notify::FEATURE,
     uia::FEATURE,
     updates::FEATURE,
     sound::FEATURE,
@@ -445,6 +446,9 @@ pub fn change(
     }
     if mode.is_some() && patch.feature.id == sound::FEATURE.id {
         sound::initialize(store, patch, progress)?;
+    }
+    if mode.is_some() && patch.feature.id == notify::FEATURE.id {
+        notify::initialize(progress)?;
     }
     let mut contents = BTreeMap::new();
     for target in patch.targets(store, mode)? {
