@@ -14,7 +14,7 @@ use iced_x86::{
 
 use crate::{
     Result,
-    feature::{Analysis, Edit, Feature, Target},
+    feature::{Analysis, Edit, Feature, Mode, Target},
     image::{Image, References, Symbols, functions},
     progress::{Progress, Step},
     xlog,
@@ -224,7 +224,7 @@ impl Analysis for Scan {
         image: &Image<'_>,
         references: &References,
         progress: &Progress,
-    ) -> Result<Vec<Edit>> {
+    ) -> Result<Vec<Mode>> {
         for &name in FUNCTIONS {
             unique(
                 functions(name, &self.symbols, references)
@@ -256,7 +256,7 @@ impl Analysis for Scan {
             "{VIEW}；RVA 0x{:08X}；sortSeq 相等 → 比较 localId",
             plan.view - image.base(),
         ));
-        Ok(edits)
+        Ok(vec![Mode::enabled(edits)])
     }
 }
 

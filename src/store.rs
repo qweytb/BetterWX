@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    collections::{BTreeMap, btree_map::Entry},
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf, Prefix},
@@ -20,13 +20,13 @@ pub struct File {
     backup: PathBuf,
     pub current: Arc<Vec<u8>>,
     pub original: Arc<Vec<u8>>,
-    pub enabled: BTreeSet<String>,
+    pub enabled: BTreeMap<String, usize>,
     pub issue: Option<String>,
 }
 
 pub struct Content {
     pub data: Vec<u8>,
-    pub enabled: BTreeSet<String>,
+    pub enabled: BTreeMap<String, usize>,
 }
 
 pub fn display(path: &Path) -> String {
@@ -139,7 +139,7 @@ impl Store {
                     target,
                     Content {
                         data,
-                        enabled: BTreeSet::new(),
+                        enabled: BTreeMap::new(),
                     },
                 )
             })
@@ -176,7 +176,7 @@ impl File {
             backup,
             current,
             original,
-            enabled: BTreeSet::new(),
+            enabled: BTreeMap::new(),
             issue: None,
         })
     }

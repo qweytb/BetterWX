@@ -4,7 +4,7 @@ use iced_x86::{Code, Decoder, DecoderOptions, Register};
 
 use crate::{
     Result,
-    feature::{Analysis, Edit, Feature, Target},
+    feature::{Analysis, Edit, Feature, Mode, Target},
     image::{Image, References, Symbols, assembly},
     progress::Progress,
 };
@@ -110,10 +110,10 @@ impl Analysis for Scan {
         _image: &Image<'_>,
         _references: &References,
         _progress: &Progress,
-    ) -> Result<Vec<Edit>> {
+    ) -> Result<Vec<Mode>> {
         if !self.emitted {
             return Err("无法唯一定位无障碍开关写入函数".into());
         }
-        Ok(Vec::new())
+        Ok(vec![Mode::enabled(Vec::new())])
     }
 }

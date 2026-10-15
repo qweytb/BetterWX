@@ -7,7 +7,7 @@ use iced_x86::{Code, Instruction, OpKind, Register};
 
 use crate::{
     Result,
-    feature::{Analysis, Edit, Feature, Target},
+    feature::{Analysis, Edit, Feature, Mode, Target},
     image::{Image, References, Symbols, functions},
     progress::Progress,
     xlog,
@@ -161,7 +161,7 @@ impl Analysis for Scan {
         _image: &Image<'_>,
         references: &References,
         _progress: &Progress,
-    ) -> Result<Vec<Edit>> {
+    ) -> Result<Vec<Mode>> {
         if functions(INIT, &self.symbols, references).len() != 1 {
             return Err("无法唯一定位账号信息初始化回调".into());
         }
@@ -171,6 +171,6 @@ impl Analysis for Scan {
         if !self.emitted {
             return Err("无法唯一定位登录按钮处理函数".into());
         }
-        Ok(Vec::new())
+        Ok(vec![Mode::enabled(Vec::new())])
     }
 }

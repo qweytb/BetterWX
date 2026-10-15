@@ -48,7 +48,7 @@ pub trait Analysis {
         image: &Image<'_>,
         references: &References,
         progress: &Progress,
-    ) -> Result<Vec<Edit>>;
+    ) -> Result<Vec<Mode>>;
 }
 
 impl Target {
@@ -60,31 +60,44 @@ impl Target {
     }
 }
 
+#[derive(Clone)]
 pub struct Edit {
     pub range: Range<usize>,
     pub bytes: Vec<u8>,
 }
 
+pub struct Mode<T = Vec<Edit>> {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub edits: T,
+}
+
+impl<T> Mode<T> {
+    pub fn enabled(edits: T) -> Self {
+        Self {
+            id: "enabled",
+            name: "开启",
+            edits,
+        }
+    }
+}
+
 pub struct Prepared {
     pub feature: &'static Feature,
-    pub edits: std::result::Result<Edits, String>,
+    pub edits: std::result::Result<Vec<Mode<Edits>>, String>,
     pub resources: BTreeMap<PathBuf, Resources>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Disabled,
-    Enabled,
+    Enabled(usize),
     Partial,
 }
 
 impl State {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Disabled => "关闭",
-            Self::Enabled => "开启",
-            Self::Partial => "部分开启",
-        }
+    pub fn enabled(self) -> bool {
+        matches!(self, Self::Enabled(_))
     }
 }
 
@@ -92,37 +105,56 @@ impl Prepared {
     pub fn issue<'a>(&'a self, store: &'a Store) -> Option<&'a String> {
         match &self.edits {
             Err(error) => Some(error),
-            Ok(edits) => edits
-                .keys()
+            Ok(modes) => modes
+                .iter()
+                .flat_map(|mode| mode.edits.keys())
                 .find_map(|target| store.files[target].issue.as_ref()),
         }
     }
 
     pub fn state(&self, store: &Store) -> State {
-        let Ok(edits) = &self.edits else {
+        let Ok(modes) = &self.edits else {
             return State::Disabled;
         };
-        let enabled = edits
-            .keys()
-            .filter(|target| store.files[*target].enabled.contains(self.feature.id))
-            .count();
-        if enabled == 0 {
-            State::Disabled
-        } else if enabled == edits.len() {
-            State::Enabled
-        } else {
-            State::Partial
+        let states: BTreeSet<_> = modes
+            .iter()
+            .flat_map(|mode| mode.edits.keys())
+            .map(|target| store.files[target].enabled.get(self.feature.id).copied())
+            .collect();
+        match states.into_iter().collect::<Vec<_>>().as_slice() {
+            [] | [None] => State::Disabled,
+            [Some(mode)] => State::Enabled(*mode),
+            _ => State::Partial,
         }
     }
 
-    pub fn targets(&self, store: &Store, enable: bool) -> Result<Vec<PathBuf>> {
+    pub fn label(&self, state: State) -> &'static str {
+        match state {
+            State::Disabled => "关闭",
+            State::Enabled(mode) => self.edits.as_ref().expect("mode not prepared")[mode].name,
+            State::Partial => "部分开启",
+        }
+    }
+
+    pub fn next(&self, store: &Store) -> Option<usize> {
+        match self.state(store) {
+            State::Enabled(mode) if mode + 1 == self.edits.as_ref().expect("modes").len() => None,
+            State::Enabled(mode) => Some(mode + 1),
+            _ => Some(0),
+        }
+    }
+
+    pub fn targets(&self, store: &Store, mode: Option<usize>) -> Result<Vec<PathBuf>> {
         Ok(self
             .edits
             .as_ref()
             .map_err(|error| error.clone())?
-            .keys()
-            .filter(|target| store.files[*target].enabled.contains(self.feature.id) != enable)
+            .iter()
+            .flat_map(|mode| mode.edits.keys())
+            .filter(|target| store.files[*target].enabled.get(self.feature.id).copied() != mode)
             .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect())
     }
 }
@@ -168,7 +200,7 @@ pub fn analyze(
         .iter()
         .map(|feature| Prepared {
             feature,
-            edits: Ok(Edits::new()),
+            edits: Ok(Vec::new()),
             resources: BTreeMap::new(),
         })
         .collect();
@@ -209,7 +241,7 @@ pub fn analyze(
             match (target.find)(&image, progress) {
                 Ok(symbols) => {
                     let analysis = (target.scan)(symbols.clone());
-                    found.push((index, symbols, analysis));
+                    found.push((index, symbols, analysis, Vec::new()));
                 }
                 Err(error) => {
                     let error = error.to_string();
@@ -223,7 +255,7 @@ pub fn analyze(
         }
         let labels = found
             .iter()
-            .flat_map(|(_, symbols, _)| symbols)
+            .flat_map(|(_, symbols, _, _)| symbols)
             .flat_map(|(name, addresses)| {
                 addresses
                     .iter()
@@ -231,7 +263,7 @@ pub fn analyze(
             })
             .collect();
         let mut listeners: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
-        for (index, (_, symbols, _)) in found.iter().enumerate() {
+        for (index, (_, symbols, _, _)) in found.iter().enumerate() {
             for address in symbols.values().flatten() {
                 listeners.entry(*address).or_default().push(index);
             }
@@ -246,17 +278,13 @@ pub fn analyze(
                     .collect();
                 for listener in listeners {
                     progress.check()?;
-                    let (index, _, analysis) = &mut found[listener];
+                    let (index, _, analysis, common) = &mut found[listener];
                     if prepared[*index].edits.is_err() {
                         continue;
                     }
                     let progress = progress.group(features[*index].name);
                     match analysis.visit(&image, function, references, &progress) {
-                        Ok(edits) => {
-                            if let Ok(changes) = &mut prepared[*index].edits {
-                                changes.entry(path.clone()).or_default().extend(edits);
-                            }
-                        }
+                        Ok(edits) => common.extend(edits),
                         Err(error) => {
                             let error = error.to_string();
                             progress.fail(&error);
@@ -269,13 +297,13 @@ pub fn analyze(
                 Ok(references) => references,
                 Err(error) => {
                     progress.fail(&error.to_string());
-                    for (index, _, _) in found {
+                    for (index, _, _, _) in found {
                         prepared[index].edits = Err(error.to_string());
                     }
                     continue;
                 }
             };
-        for (index, _, analysis) in found {
+        for (index, _, analysis, common) in found {
             progress.check()?;
             if prepared[index].edits.is_err() {
                 continue;
@@ -283,9 +311,25 @@ pub fn analyze(
             let progress = progress.group(features[index].name);
             let resources = analysis.resources();
             match analysis.finish(&image, &references, &progress) {
-                Ok(edits) => {
-                    if let Ok(changes) = &mut prepared[index].edits {
-                        changes.entry(path.clone()).or_default().extend(edits);
+                Ok(modes) => {
+                    if let Ok(choices) = &mut prepared[index].edits {
+                        for mode in modes {
+                            let choice =
+                                match choices.iter().position(|choice| choice.id == mode.id) {
+                                    Some(index) => &mut choices[index],
+                                    None => {
+                                        choices.push(Mode {
+                                            id: mode.id,
+                                            name: mode.name,
+                                            edits: Edits::new(),
+                                        });
+                                        choices.last_mut().expect("mode")
+                                    }
+                                };
+                            let edits = choice.edits.entry(path.clone()).or_default();
+                            edits.extend(common.iter().cloned());
+                            edits.extend(mode.edits);
+                        }
                     }
                     if !resources.is_empty() {
                         prepared[index].resources.insert(path.clone(), resources);
@@ -307,25 +351,26 @@ pub fn inspect(store: &mut Store, prepared: &[Prepared], progress: &Progress) ->
         let name = target.file_name().unwrap_or_default().to_string_lossy();
         let step = progress.start("识别当前补丁", file.current.len() as u64, "字节");
         step.detail(name.as_ref());
-        let mut enabled = BTreeSet::new();
+        let mut enabled = BTreeMap::new();
         for patch in prepared {
             progress.check()?;
-            let Some(edits) = patch
-                .edits
-                .as_ref()
-                .ok()
-                .and_then(|edits| edits.get(target))
-            else {
+            let Ok(modes) = &patch.edits else {
                 continue;
             };
-            let applied = !edits.is_empty()
-                && edits.iter().all(|edit| {
-                    file.current
-                        .get(edit.range.start..edit.range.start + edit.bytes.len())
-                        == Some(edit.bytes.as_slice())
-                });
-            if applied {
-                enabled.insert(patch.feature.id.to_owned());
+            for (mode, choice) in modes.iter().enumerate() {
+                let Some(edits) = choice.edits.get(target) else {
+                    continue;
+                };
+                let applied = !edits.is_empty()
+                    && edits.iter().all(|edit| {
+                        file.current
+                            .get(edit.range.start..edit.range.start + edit.bytes.len())
+                            == Some(edit.bytes.as_slice())
+                    });
+                if applied {
+                    enabled.insert(patch.feature.id.to_owned(), mode);
+                    break;
+                }
             }
         }
         let expected = generate(&file.original, &enabled, prepared, target)?;
@@ -366,8 +411,19 @@ pub fn inspect(store: &mut Store, prepared: &[Prepared], progress: &Progress) ->
         } else {
             prepared
                 .iter()
-                .filter(|patch| enabled.contains(patch.feature.id))
-                .map(|patch| patch.feature.name)
+                .filter_map(|patch| {
+                    enabled.get(patch.feature.id).map(|mode| {
+                        if patch.edits.as_ref().expect("modes").len() == 1 {
+                            patch.feature.name.to_owned()
+                        } else {
+                            format!(
+                                "{}：{}",
+                                patch.feature.name,
+                                patch.label(State::Enabled(*mode))
+                            )
+                        }
+                    })
+                })
                 .collect::<Vec<_>>()
                 .join("、")
         };
@@ -380,22 +436,22 @@ pub fn inspect(store: &mut Store, prepared: &[Prepared], progress: &Progress) ->
 pub fn change(
     store: &Store,
     patch: &Prepared,
-    enable: bool,
+    mode: Option<usize>,
     prepared: &[Prepared],
     progress: &Progress,
 ) -> Result<BTreeMap<PathBuf, Content>> {
     if let Some(issue) = patch.issue(store) {
         return Err(issue.clone().into());
     }
-    if enable && patch.feature.id == sound::FEATURE.id {
+    if mode.is_some() && patch.feature.id == sound::FEATURE.id {
         sound::initialize(store, patch, progress)?;
     }
     let mut contents = BTreeMap::new();
-    for target in patch.targets(store, enable)? {
+    for target in patch.targets(store, mode)? {
         let file = &store.files[&target];
         let mut enabled = file.enabled.clone();
-        if enable {
-            enabled.insert(patch.feature.id.to_owned());
+        if let Some(mode) = mode {
+            enabled.insert(patch.feature.id.to_owned(), mode);
         } else {
             enabled.remove(patch.feature.id);
         }
@@ -415,16 +471,20 @@ pub fn describe(
         let file = &store.files[target];
         let name = target.file_name().unwrap_or_default().to_string_lossy();
         for patch in prepared {
-            let Ok(edits) = &patch.edits else {
+            let Ok(modes) = &patch.edits else {
                 continue;
             };
-            let Some(edits) = edits.get(target) else {
-                continue;
-            };
-            if file.enabled.contains(patch.feature.id) == content.enabled.contains(patch.feature.id)
-            {
+            let previous = file.enabled.get(patch.feature.id).copied();
+            let current = content.enabled.get(patch.feature.id).copied();
+            if previous == current {
                 continue;
             }
+            let Some(mode) = current.or(previous) else {
+                continue;
+            };
+            let Some(edits) = modes[mode].edits.get(target) else {
+                continue;
+            };
             let image = Image::parse(&file.original)?;
             let step = progress.group(patch.feature.name).activity("生成文件内容");
             let mut size = 0;
@@ -449,11 +509,7 @@ pub fn describe(
             }
             step.finish(format!(
                 "{name}；{}；差异 {size} 字节",
-                if content.enabled.contains(patch.feature.id) {
-                    "启用"
-                } else {
-                    "关闭"
-                }
+                patch.label(current.map_or(State::Disabled, State::Enabled)),
             ));
         }
     }
@@ -462,21 +518,22 @@ pub fn describe(
 
 fn generate(
     original: &[u8],
-    enabled: &BTreeSet<String>,
+    enabled: &BTreeMap<String, usize>,
     prepared: &[Prepared],
     target: &Path,
 ) -> Result<Vec<u8>> {
     let mut edits = Vec::new();
-    for id in enabled {
+    for (id, mode) in enabled {
         let patch = prepared
             .iter()
             .find(|patch| patch.feature.id == id)
             .ok_or_else(|| format!("未知功能：{id}"))?;
-        let changes = patch
+        let modes = patch
             .edits
             .as_ref()
             .map_err(|error| format!("{}：{error}", patch.feature.name))?;
-        if let Some(changes) = changes.get(target) {
+        let mode = modes.get(*mode).ok_or("找不到所选功能模式")?;
+        if let Some(changes) = mode.edits.get(target) {
             edits.extend(changes);
         }
     }

@@ -28,7 +28,7 @@ BetterWX
 用法：
   betterwx
   betterwx status [Weixin.dll]
-  betterwx enable <功能> [Weixin.dll]
+  betterwx enable <功能> [--mode <模式>] [Weixin.dll]
   betterwx disable <功能> [Weixin.dll]
   betterwx coexist <create|remove> <字母> [Weixin.dll]
   betterwx sound import <提示音> <音频文件> [Weixin.dll]
@@ -40,7 +40,7 @@ BetterWX
 restore：恢复保存的原始文件。";
 
 fn run() -> Result<()> {
-    let mut arguments = env::args_os().skip(1);
+    let mut arguments = env::args_os().skip(1).peekable();
     let Some(command) = arguments.next() else {
         return tui::run();
     };
@@ -97,6 +97,12 @@ fn run() -> Result<()> {
         "status" | "restore" => None,
         _ => return Err(format!("未知命令：{command}").into()),
     };
+    let mode = if command == "enable" && arguments.peek().is_some_and(|value| value == "--mode") {
+        arguments.next();
+        Some(arguments.next().ok_or("需要指定模式")?)
+    } else {
+        None
+    };
     let path = arguments.next().map(PathBuf::from);
     if arguments.next().is_some() {
         return Err("参数数量过多".into());
@@ -134,7 +140,7 @@ fn run() -> Result<()> {
                     if let Some(error) = patch.issue(&store) {
                         error.as_str()
                     } else {
-                        patch.state(&store).label()
+                        patch.label(patch.state(&store))
                     },
                 );
             }
@@ -168,7 +174,7 @@ fn run() -> Result<()> {
                 return Err(issue.clone().into());
             }
             if let Some(letter) = entry {
-                if patch.state(&store) != feature::State::Enabled {
+                if !patch.state(&store).enabled() {
                     return Err("启用所选版本的共存支持后可创建入口".into());
                 }
                 let path = coexist::directory(&store.target)?.join(letter.to_string());
@@ -180,13 +186,36 @@ fn run() -> Result<()> {
                 return Ok(());
             }
             let enable = command == "enable";
-            let requested = if enable {
-                feature::State::Enabled
+            let mode = if enable {
+                Some(match mode {
+                    Some(mode) => {
+                        let mode = mode.to_str().ok_or("模式名称必须为文字")?;
+                        let choices = patch.edits.as_ref().map_err(|error| error.clone())?;
+                        choices
+                            .iter()
+                            .position(|choice| choice.id == mode)
+                            .ok_or_else(|| {
+                                format!(
+                                    "未知模式：{mode}；可选：{}",
+                                    choices
+                                        .iter()
+                                        .map(|choice| choice.id)
+                                        .collect::<Vec<_>>()
+                                        .join("、")
+                                )
+                            })?
+                    }
+                    None => match patch.state(&store) {
+                        feature::State::Enabled(mode) => mode,
+                        _ => 0,
+                    },
+                })
             } else {
-                feature::State::Disabled
+                None
             };
+            let requested = mode.map_or(feature::State::Disabled, feature::State::Enabled);
             let changed = patch.state(&store) != requested;
-            let contents = feature::change(&store, patch, enable, &prepared, &progress)?;
+            let contents = feature::change(&store, patch, mode, &prepared, &progress)?;
             store.save(contents, &progress)?;
             if feature.id == sound::FEATURE.id && !enable {
                 sound::cleanup(&mut store, &prepared, &progress)?;
@@ -195,7 +224,13 @@ fn run() -> Result<()> {
                 println!(
                     "{}：{}",
                     feature.name,
-                    if enable { "已启用" } else { "已关闭" }
+                    if !enable {
+                        "已关闭"
+                    } else if patch.edits.as_ref().expect("modes").len() == 1 {
+                        "已启用"
+                    } else {
+                        patch.label(requested)
+                    }
                 );
             } else {
                 println!("当前状态已符合请求");

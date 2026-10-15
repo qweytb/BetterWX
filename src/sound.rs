@@ -10,7 +10,7 @@ use iced_x86::{Code, Register};
 
 use crate::{
     Result,
-    feature::{self, Analysis, Edit, Feature, Prepared, Resources, Target},
+    feature::{self, Analysis, Edit, Feature, Mode, Prepared, Resources, Target},
     image::{Image, References, Symbols},
     progress::Progress,
     store::{self, Store},
@@ -324,7 +324,7 @@ impl Analysis for Scan {
         image: &Image<'_>,
         _references: &References,
         progress: &Progress,
-    ) -> Result<Vec<Edit>> {
+    ) -> Result<Vec<Mode>> {
         let step = progress.activity("准备提示音资源");
         for sound in SOUNDS {
             let range = self
@@ -350,7 +350,7 @@ impl Analysis for Scan {
             })
             .collect::<Result<Vec<_>>>()?;
         step.finish(format!("{} 音频；{} 资源路径", SOUNDS.len(), edits.len()));
-        Ok(edits)
+        Ok(vec![Mode::enabled(edits)])
     }
 }
 

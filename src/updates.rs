@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, ops::Range};
 
 use crate::{
     Result,
-    feature::{Analysis, Edit, Feature, Target},
+    feature::{Analysis, Edit, Feature, Mode, Target},
     image::{Image, References, Symbols, assembly, functions},
     progress::Progress,
     xlog,
@@ -133,12 +133,12 @@ impl Analysis for Scan {
         _image: &Image<'_>,
         _references: &References,
         _progress: &Progress,
-    ) -> Result<Vec<Edit>> {
+    ) -> Result<Vec<Mode>> {
         for &(name, _) in self.functions {
             if !self.found.contains(name) {
                 return Err(format!("找不到 {}", name.trim_end_matches('\0')).into());
             }
         }
-        Ok(Vec::new())
+        Ok(vec![Mode::enabled(Vec::new())])
     }
 }

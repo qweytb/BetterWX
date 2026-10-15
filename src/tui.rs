@@ -343,11 +343,11 @@ impl Screen {
         &mut self,
         store: &mut Store,
         prepared: &[feature::Prepared],
-        change: Option<(&feature::Prepared, bool)>,
+        change: Option<(&feature::Prepared, Option<usize>)>,
         pending: bool,
     ) -> Result<(bool, String)> {
         let targets = match change {
-            Some((patch, enable)) => patch.targets(store, enable)?,
+            Some((patch, mode)) => patch.targets(store, mode)?,
             None => store.changed(),
         };
         let error = store.write_error(&targets);
@@ -542,12 +542,12 @@ fn version(path: &Path) -> String {
 fn apply(
     store: &mut Store,
     prepared: &[feature::Prepared],
-    change: Option<(&feature::Prepared, bool)>,
+    change: Option<(&feature::Prepared, Option<usize>)>,
     terminate: bool,
     progress: &Progress,
 ) -> Result<()> {
     let targets = match change {
-        Some((patch, enable)) => patch.targets(store, enable)?,
+        Some((patch, mode)) => patch.targets(store, mode)?,
         None => store.changed(),
     };
     #[cfg(not(windows))]
@@ -577,12 +577,12 @@ fn apply(
     }
     let step = progress.activity("准备文件内容");
     let contents = match change {
-        Some((patch, enable)) => {
-            let contents = feature::change(store, patch, enable, prepared, progress)?;
+        Some((patch, mode)) => {
+            let contents = feature::change(store, patch, mode, prepared, progress)?;
             step.finish(format!(
                 "{}；{}",
                 patch.feature.name,
-                if enable { "开启" } else { "关闭" }
+                patch.label(mode.map_or(feature::State::Disabled, feature::State::Enabled))
             ));
             contents
         }
@@ -594,7 +594,8 @@ fn apply(
     };
     feature::describe(store, &contents, prepared, progress)?;
     store.save(contents, progress)?;
-    if change.is_none_or(|(patch, enable)| patch.feature.id == crate::sound::FEATURE.id && !enable)
+    if change
+        .is_none_or(|(patch, mode)| patch.feature.id == crate::sound::FEATURE.id && mode.is_none())
     {
         crate::sound::cleanup(store, prepared, progress)?;
     }
@@ -613,7 +614,7 @@ fn coexist(
     let mut pending = false;
     let mut notice = String::new();
     loop {
-        let enabled = patch.state(store) == feature::State::Enabled;
+        let enabled = patch.state(store).enabled();
         let error = patch.issue(store);
         let mut items = vec![Item {
             marker: if enabled { "■" } else { "□" },
@@ -678,7 +679,12 @@ fn coexist(
                 notice = error.clone();
                 continue;
             }
-            (pending, notice) = screen.change(store, prepared, Some((patch, !enabled)), pending)?;
+            (pending, notice) = screen.change(
+                store,
+                prepared,
+                Some((patch, (!enabled).then_some(0))),
+                pending,
+            )?;
             if screen.exiting {
                 return Ok(());
             }
@@ -784,7 +790,7 @@ fn sounds(
     let mut pending = false;
     let mut notice = String::new();
     loop {
-        let enabled = patch.state(store) == feature::State::Enabled;
+        let enabled = patch.state(store).enabled();
         let error = patch.issue(store);
         let mut items = vec![Item {
             marker: if enabled { "■" } else { "□" },
@@ -838,7 +844,12 @@ fn sounds(
             notice = error.clone();
             continue;
         }
-        (pending, notice) = screen.change(store, prepared, Some((patch, !enabled)), pending)?;
+        (pending, notice) = screen.change(
+            store,
+            prepared,
+            Some((patch, (!enabled).then_some(0))),
+            pending,
+        )?;
         if screen.exiting {
             return Ok(());
         }
@@ -873,20 +884,23 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                 }
                 let error = patch.issue(&store);
                 let state = patch.state(&store);
+                let multiple = patch.edits.as_ref().is_ok_and(|modes| modes.len() > 1);
                 let label = patch.feature.name.to_owned();
                 let value = if pending == Some(index) {
-                    format!(
-                        "结束占用进程并{}",
-                        if state == feature::State::Enabled {
-                            "关闭"
-                        } else {
-                            "开启"
+                    let action = match patch.next(&store) {
+                        None => "关闭".to_owned(),
+                        Some(mode) if multiple => {
+                            format!("切换为{}", patch.label(feature::State::Enabled(mode)))
                         }
-                    )
+                        Some(_) => "开启".to_owned(),
+                    };
+                    format!("结束占用进程并{action}")
                 } else {
                     if error.is_some() {
                         "不可用"
-                    } else if state == feature::State::Enabled {
+                    } else if multiple {
+                        patch.label(state)
+                    } else if state.enabled() {
                         "已启用"
                     } else {
                         "未启用"
@@ -894,7 +908,7 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                     .to_owned()
                 };
                 Item {
-                    marker: if error.is_none() && state == feature::State::Enabled {
+                    marker: if error.is_none() && state.enabled() {
                         "■"
                     } else {
                         "□"
@@ -948,7 +962,7 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                 notice = error.clone();
                 continue;
             }
-            Some((patch, patch.state(&store) != feature::State::Enabled))
+            Some((patch, patch.next(&store)))
         } else if selected == prepared.len() {
             None
         } else {

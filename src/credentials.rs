@@ -10,7 +10,7 @@ use iced_x86::{
 
 use crate::{
     Result,
-    feature::{Analysis, Edit, Feature, Target},
+    feature::{Analysis, Edit, Feature, Mode, Target},
     image::{Image, References, Symbols, functions},
     login,
     progress::Progress,
@@ -104,11 +104,11 @@ impl Analysis for Scan {
         _image: &Image<'_>,
         _references: &References,
         _progress: &Progress,
-    ) -> Result<Vec<Edit>> {
+    ) -> Result<Vec<Mode>> {
         if !self.emitted {
             return Err("找不到登录信息恢复流程".into());
         }
-        Ok(Vec::new())
+        Ok(vec![Mode::enabled(Vec::new())])
     }
 }
 
