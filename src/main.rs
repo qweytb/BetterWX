@@ -8,6 +8,7 @@ mod notify;
 #[cfg(windows)]
 mod process;
 mod progress;
+mod resources;
 mod revoke;
 mod sound;
 mod store;
