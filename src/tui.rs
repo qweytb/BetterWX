@@ -413,8 +413,15 @@ impl Screen {
             Print(heading.bold()),
             Clear(ClearType::UntilNewLine)
         )?;
-        for (index, row) in (2..self.rows).rev().enumerate() {
-            sleep(4 + index as u32 * 5);
+        let start = Instant::now();
+        for row in (2..self.rows).rev() {
+            let remaining = f64::from(row - 2) / f64::from(self.rows - 2);
+            let deadline = start + Duration::from_millis(350).mul_f64(1.0 - remaining.sqrt());
+            sleep(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis() as u32,
+            );
             execute!(self.output, MoveTo(0, row), Clear(ClearType::CurrentLine))?;
         }
         let banner = format!("  BetterWX v{}  ", env!("CARGO_PKG_VERSION"));
