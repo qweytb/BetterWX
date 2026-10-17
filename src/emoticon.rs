@@ -30,14 +30,15 @@ const EXPORT: &str = "kernel::service::FileService::CopyToWriteAblePath(const ke
 const DOWNLOAD: &str = "mmui::ChatFileItemViewModel::AddDownloadAction";
 const BUFFER: &str = "kernel::manager::EmoticonManager::GetEmoticonDataWithMd5";
 const INFO: &str = "kernel::EmoticonMsgInfo::GenMsgInfoFromMessage";
-const READ: &str = "kernel::manager::SyncReadEmoticonData";
+const EXTRA: &str = "virtual kernel::EmoticonMessageExtInfo::CopyFromOriginOnForward";
+const READ: &str = "kernel::manager::ReadEmoticonData";
 const FORMAT: &str = "kernel::imageutil::GetImageFormat";
 const EXTENSION: &str = "kernel::imageutil::GetImageFormatStr";
 const WRITE: &str = "kernel::fileutil::WriteFile";
 const TEMP: &str = "RWTemp";
 const NAMES: &[&str] = &[
-    MENU, CONSTRUCT, CLICK, RECORD, PREVIEW, COPY, EXPORT, DOWNLOAD, BUFFER, INFO, READ, FORMAT,
-    EXTENSION, WRITE,
+    MENU, CONSTRUCT, CLICK, RECORD, PREVIEW, COPY, EXPORT, DOWNLOAD, BUFFER, INFO, EXTRA, READ,
+    FORMAT, EXTENSION, WRITE,
 ];
 
 pub const FEATURE: Feature = Feature {
@@ -72,11 +73,14 @@ struct Native {
     copy_text: u64,
     copy_blocked: u64,
     path: u64,
+    exists: u64,
     path_destroy: u64,
     string_destroy: u64,
     shared_destroy: u64,
     set_destroy: u64,
-    buffer: u64,
+    key: u64,
+    read: u64,
+    image_check: u64,
     format: u64,
     extension: u64,
     write: u64,
@@ -195,7 +199,8 @@ fn argument(body: &[Instruction], index: usize, register: Register) -> Result<In
         .rev()
         .take_while(|instruction| instruction.mnemonic() != Mnemonic::Call)
         .find(|instruction| {
-            instruction.op0_kind() == OpKind::Register && instruction.op0_register() == register
+            instruction.op0_kind() == OpKind::Register
+                && instruction.op0_register().full_register() == register.full_register()
         })
         .copied()
         .ok_or_else(|| format!("找不到参数寄存器 {register:?}").into())
@@ -238,7 +243,8 @@ fn callers(references: &References, address: u64) -> Vec<Range<u64>> {
         .collect()
 }
 
-fn cleanup(image: &Image<'_>, range: &Range<u64>, state: usize) -> Result<Vec<Instruction>> {
+fn cleanup(image: &Image<'_>, range: &Range<u64>, state: i32) -> Result<Vec<Instruction>> {
+    let state = usize::try_from(state)?;
     let unwind = image.unwind_info(range.start)?;
     let header = image.data(unwind, 4)?;
     let offset = (4 + usize::from(header[2]) * 2).next_multiple_of(4);
@@ -260,7 +266,7 @@ fn cleanup(image: &Image<'_>, range: &Range<u64>, state: usize) -> Result<Vec<In
     image.instructions(&function(image, target)?)
 }
 
-fn method_tables(image: &Image<'_>, body: &[Instruction]) -> Result<Vec<(u64, u64)>> {
+fn tables(image: &Image<'_>, body: &[Instruction]) -> Result<Vec<u64>> {
     let mut result = Vec::new();
     for address in referenced(body) {
         let Ok(locator) = pointed(image, address - 8) else {
@@ -278,7 +284,7 @@ fn method_tables(image: &Image<'_>, body: &[Instruction]) -> Result<Vec<(u64, u6
             continue;
         };
         if image.data(target, 1).is_ok() {
-            result.push((address, target));
+            result.push(address);
         }
     }
     Ok(result)
@@ -403,6 +409,27 @@ impl Native {
                 .collect(),
             "复制文件命名函数",
         )?;
+        let format_call = call(&worker_body, extension)?;
+        let filename_call = call(&worker_body, filename.start)?;
+        let check = unique(
+            worker_body
+                .windows(2)
+                .enumerate()
+                .filter_map(|(index, window)| {
+                    (window[0].mnemonic() == Mnemonic::Test
+                        && window[0].op0_register() == Register::AL
+                        && window[0].op1_register() == Register::AL
+                        && window[1].mnemonic() == Mnemonic::Je
+                        && window[1].near_branch_target() > worker_body[format_call].ip()
+                        && window[1].near_branch_target() < worker_body[filename_call].ip())
+                    .then_some(index)
+                })
+                .collect(),
+            "图片扩展名分支",
+        )?;
+        let image_check = calls(&worker_body[..check])
+            .next_back()
+            .ok_or("找不到图片类型检查")?;
         let record = named(RECORD)?;
         let delegate = unique(callers(references, record.start), "媒体预览分派")?;
         let delegate_body = image.instructions(&delegate)?;
@@ -419,7 +446,8 @@ impl Native {
         let file_menu = unique(callers(references, named(DOWNLOAD)?.start), "文件消息菜单")?;
         let file_body = image.instructions(&file_menu)?;
         let mut copy_tables = Vec::new();
-        for (table, method) in method_tables(image, &file_body)? {
+        for table in tables(image, &file_body)? {
+            let method = pointed(image, table + 16)?;
             if let Ok(function) = function(image, method)
                 && calls(&image.instructions(&function)?).any(|(_, target)| target == copy.start)
             {
@@ -447,38 +475,152 @@ impl Native {
             .next_back()
             .ok_or("找不到复制菜单条件")?
             .1;
-        let read_body = image.instructions(&named(READ)?)?;
-        let cache = calls(&read_body).next().ok_or("找不到表情缓存路径")?.1;
-        let mut paths = Vec::new();
-        for function in callers(references, cache) {
-            let body = image.instructions(&function)?;
-            if calls(&body)
-                .next()
-                .is_some_and(|(_, target)| target == cache)
-                && calls(&body).filter(|(_, target)| *target == cache).count() == 1
-                && body.iter().any(|instruction| {
-                    instruction.code() == Code::Call_rm64
-                        && instruction.op0_kind() == OpKind::Memory
-                        && instruction.memory_displacement64() == 0x60
+        let wrapper = image.instructions(&named(BUFFER)?)?;
+        let readers = functions(READ, symbols, references);
+        let (read_call, read) = unique(
+            calls(&wrapper)
+                .filter(|(_, target)| readers.contains_key(target))
+                .collect(),
+            "表情数据读取",
+        )?;
+        let key_slot = stack_argument(&wrapper, read_call, Register::R8)?;
+        let key = unique(
+            calls(&wrapper[..read_call])
+                .filter_map(|(index, target)| {
+                    stack_argument(&wrapper, index, Register::RCX)
+                        .is_ok_and(|slot| slot == key_slot)
+                        .then_some(target)
                 })
+                .collect(),
+            "表情密钥获取",
+        )?;
+        let read_body = image.instructions(&readers[&read])?;
+        let mut caches: BTreeMap<u64, BTreeSet<bool>> = BTreeMap::new();
+        for (index, target) in calls(&read_body) {
+            let Ok(value) = argument(&read_body, index, Register::R8) else {
+                continue;
+            };
+            let value = if value.mnemonic() == Mnemonic::Xor
+                && value.op0_register() == value.op1_register()
             {
-                paths.push(function.start);
+                Some(false)
+            } else if value.mnemonic() == Mnemonic::Mov {
+                match value.op1_kind() {
+                    OpKind::Immediate8 if value.immediate8() <= 1 => Some(value.immediate8() != 0),
+                    OpKind::Immediate32 if value.immediate32() <= 1 => {
+                        Some(value.immediate32() != 0)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(value) = value {
+                caches.entry(target).or_default().insert(value);
             }
         }
-        let path = unique(paths, "可用表情缓存路径")?;
-        let destructors = cleanup(image, &worker, 0)?;
+        let cache = unique(
+            caches
+                .into_iter()
+                .filter_map(|(target, values)| (values.len() == 2).then_some(target))
+                .collect(),
+            "表情缓存路径",
+        )?;
+        let metadata = named(INFO)?;
+        let info_body = image.instructions(&metadata)?;
+        let text = image
+            .sections()?
+            .into_iter()
+            .map(|(start, data)| start..start + data.len() as u64)
+            .find(|range| range.contains(&metadata.start))
+            .ok_or("找不到表情信息代码节")?;
+        let mut paths = BTreeSet::new();
+        for mut cursor in tables(image, &info_body)? {
+            loop {
+                let method = pointed(image, cursor)?;
+                if !text.contains(&method) {
+                    break;
+                }
+                cursor += 8;
+                let Ok(method) = function(image, method) else {
+                    continue;
+                };
+                let body = image.instructions(&method)?;
+                if calls(&body).filter(|(_, target)| *target == cache).count() == 1
+                    && body.iter().any(|instruction| {
+                        instruction.code() == Code::Call_rm64
+                            && instruction.op0_kind() == OpKind::Memory
+                            && !instruction.is_ip_rel_memory_operand()
+                    })
+                {
+                    paths.insert(method.start);
+                }
+            }
+        }
+        let path = unique(paths.into_iter().collect(), "可用表情缓存路径")?;
+        let path_body = image.instructions(&function(image, path)?)?;
+        let exists = unique(
+            calls(&path_body)
+                .filter_map(|(index, target)| {
+                    path_body[index + 1..]
+                        .iter()
+                        .find(|instruction| instruction.mnemonic() != Mnemonic::Nop)
+                        .filter(|instruction| {
+                            instruction.mnemonic() == Mnemonic::Test
+                                && instruction.op0_register() == Register::AL
+                                && instruction.op1_register() == Register::AL
+                        })
+                        .map(|_| target)
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            "资源路径检查",
+        )?;
+        let states = image.exception_states(worker.start)?;
+        let initial = states
+            .iter()
+            .rev()
+            .find(|state| state.instruction <= worker_body[image_check.0].ip())
+            .ok_or("找不到资源结果构造后的异常状态")?;
+        let destination = states
+            .iter()
+            .find(|state| state.instruction > worker_body[filename_call].ip())
+            .ok_or("找不到复制目标构造后的异常状态")?;
+        let copied = unique(
+            calls(&worker_body)
+                .filter_map(|(index, _)| {
+                    worker_body[index + 1..]
+                        .iter()
+                        .find(|instruction| instruction.mnemonic() != Mnemonic::Nop)
+                        .filter(|instruction| {
+                            instruction.mnemonic() == Mnemonic::Mov
+                                && instruction.op0_register() == Register::EBX
+                                && instruction.op1_register() == Register::EAX
+                        })
+                        .map(|_| worker_body[index].ip())
+                })
+                .collect(),
+            "原生资源复制调用",
+        )?;
+        let formats = states
+            .iter()
+            .rev()
+            .find(|state| state.instruction <= copied)
+            .ok_or("找不到图片格式集合的异常状态")?;
+        let destructors = cleanup(image, &worker, initial.state)?;
         let destructors: Vec<_> = calls(&destructors).map(|(_, target)| target).collect();
         let [string_destroy, shared_destroy] = destructors[..] else {
             return Err("无法识别复制资源清理函数".into());
         };
         let path_destroy = unique(
-            calls(&cleanup(image, &worker, 1)?)
+            calls(&cleanup(image, &worker, destination.state)?)
                 .map(|(_, target)| target)
                 .collect(),
             "路径清理函数",
         )?;
         let set_destroy = unique(
-            calls(&cleanup(image, &worker, 2)?)
+            calls(&cleanup(image, &worker, formats.state)?)
                 .map(|(_, target)| target)
                 .collect(),
             "图片格式集合清理函数",
@@ -526,38 +668,42 @@ impl Native {
             }
         }
         let write = unique(writes, "图片缓冲写入")?;
-        let info_body = image.instructions(&named(INFO)?)?;
-        let casts: Vec<_> = calls(&info_body)
+        let (extra_table, _) = table(image, named(EXTRA)?.start, progress)?;
+        let locator = pointed(image, extra_table - 8)?;
+        let emoticon_type =
+            image.base() + u64::from(u32::from_le_bytes(image.data(locator + 12, 4)?.try_into()?));
+        let casts = calls(&info_body)
             .filter_map(|(index, target)| {
                 let source = literal(&info_body, index, Register::R8).ok()?;
                 let destination = literal(&info_body, index, Register::R9).ok()?;
                 let zero = argument(&info_body, index, Register::EDX).ok()?;
-                (zero.mnemonic() == Mnemonic::Xor && zero.op1_register() == Register::EDX)
-                    .then_some((target, source, destination))
+                (destination == emoticon_type
+                    && zero.mnemonic() == Mnemonic::Xor
+                    && zero.op1_register() == Register::EDX)
+                    .then_some((target, source))
             })
-            .collect();
-        let &(cast, base_type, emoticon_type) = casts.first().ok_or("找不到表情消息类型转换")?;
-        if casts
-            .iter()
-            .any(|&(target, source, _)| target != cast || source != base_type)
+            .collect::<BTreeSet<_>>();
+        let (cast, base_type) = unique(casts.into_iter().collect(), "表情消息类型转换")?;
+        let mut extra_fields = BTreeSet::new();
+        for target in calls(&image.instructions(&schedule)?)
+            .map(|(_, target)| target)
+            .collect::<BTreeSet<_>>()
         {
-            return Err("表情消息类型转换不一致".into());
-        }
-        let source = calls(&image.instructions(&schedule)?)
-            .next()
-            .ok_or("找不到消息资源路径读取")?
-            .1;
-        let source_body = image.instructions(&function(image, source)?)?;
-        let extra_fields = calls(&source_body)
-            .filter(|(_, target)| *target == cast)
-            .map(|(index, _)| {
+            let Ok(source) = function(image, target) else {
+                continue;
+            };
+            let source_body = image.instructions(&source)?;
+            for (index, _) in calls(&source_body).filter(|(_, target)| *target == cast) {
+                if literal(&source_body, index, Register::R8).ok() != Some(base_type) {
+                    continue;
+                }
                 let argument = argument(&source_body, index, Register::RCX)?;
                 if argument.code() != Code::Mov_r64_rm64 || argument.op1_kind() != OpKind::Memory {
                     return Err("无法识别消息资源数据位置".into());
                 }
-                Ok(argument.memory_displacement64() as i64)
-            })
-            .collect::<Result<BTreeSet<_>>>()?;
+                extra_fields.insert(argument.memory_displacement64() as i64);
+            }
+        }
         let extra_field = unique(extra_fields.into_iter().collect(), "消息资源数据位置")?;
         Ok(Self {
             menu,
@@ -576,11 +722,14 @@ impl Native {
             copy_text,
             copy_blocked,
             path,
+            exists,
             path_destroy,
             string_destroy,
             shared_destroy,
             set_destroy,
-            buffer: named(BUFFER)?.start,
+            key,
+            read,
+            image_check: image_check.1,
             format,
             extension,
             write,
@@ -646,7 +795,7 @@ fn destroy(body: &mut Body<'_, '_>, range: Range<usize>, slot: i64, target: u64)
 fn worker(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
     let mut output = Body::new(image, &native.worker)?;
     let body = output.original.clone();
-    let image_check = calls(&body).next().ok_or("找不到图片类型检查")?.0;
+    let image_check = call(&body, native.image_check)?;
     let format = call(&body, native.extension)?;
     let filename = call(&body, native.filename.start)?;
     let suffix = stack_argument(&body, filename, Register::R8)?;
@@ -718,20 +867,7 @@ fn worker(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
     let mut identify = code.create_label();
     let mut gif = code.create_label();
     let mut assigned = code.create_label();
-    let mut long = code.create_label();
-    let mut extensions: Vec<_> = [
-        (1, ".jpg"),
-        (2, ".png"),
-        (3, ".tiff"),
-        (4, ".bmp"),
-        (5, ".heic"),
-        (6, ".heif"),
-        (7, ".wxgf"),
-        (8, ".webp"),
-    ]
-    .into_iter()
-    .map(|(kind, extension)| (kind, extension, code.create_label()))
-    .collect();
+    let mut inline = code.create_label();
     code.cmp(dword_ptr(r14 + 8), 47)?;
     code.jne(ordinary)?;
     code.mov(rcx, qword_ptr(r14 + native.extra_field))?;
@@ -744,15 +880,17 @@ fn worker(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
     code.call(native.cast)?;
     code.test(rax, rax)?;
     code.jz(failed)?;
-    code.lea(r8, ptr(rax + 0x228))?;
-    code.lea(rdx, ptr(rbp + owner))?;
-    code.xor(ecx, ecx)?;
+    code.lea(rbx, ptr(rax + 0x228))?;
+    code.lea(rcx, ptr(rbp + suffix))?;
+    code.call(native.key)?;
+    code.lea(rcx, ptr(rbp + owner))?;
+    code.mov(rdx, rbx)?;
+    code.lea(r8, ptr(rbp + suffix))?;
     code.xor(r9d, r9d)?;
-    code.call(native.buffer)?;
-    code.mov(rax, qword_ptr(rbp + owner))?;
-    code.test(rax, rax)?;
+    code.call(native.read)?;
+    code.mov(rbx, qword_ptr(rbp + owner))?;
+    code.test(rbx, rbx)?;
     code.jz(failed)?;
-    code.mov(rbx, qword_ptr(rax))?;
     code.cmp(qword_ptr(rbx + 16), 12)?;
     code.jb(failed)?;
     code.mov(rcx, rbx)?;
@@ -764,9 +902,36 @@ fn worker(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
     code.call(native.format)?;
     code.mov(edx, 4)?;
     code.xor(r9d, r9d)?;
-    for (kind, _, label) in &extensions {
-        code.cmp(eax, *kind)?;
-        code.je(*label)?;
+    let mut previous = "";
+    for (kind, extension) in [
+        (1, ".jpg"),
+        (2, ".png"),
+        (4, ".bmp"),
+        (3, ".tiff"),
+        (5, ".heic"),
+        (6, ".heif"),
+        (7, ".wxgf"),
+        (8, ".webp"),
+    ] {
+        let bytes = extension.as_bytes();
+        if extension.len() == 5 && previous.len() == 4 {
+            code.inc(edx)?;
+        }
+        if previous.as_bytes().get(..4) != Some(&bytes[..4]) {
+            code.mov(ecx, u32::from_le_bytes(bytes[..4].try_into()?))?;
+        }
+        if let Some(&last) = bytes.get(4)
+            && previous.as_bytes().get(4) != Some(&last)
+        {
+            code.mov(r9b, i32::from(last))?;
+        }
+        code.add_instruction(Instruction::with2(
+            Code::Cmp_rm32_imm8,
+            Register::EAX,
+            kind,
+        )?)?;
+        code.je(assigned)?;
+        previous = extension;
     }
     code.mov(rcx, qword_ptr(rbp + temporary))?;
     code.cmp(dword_ptr(rcx), 0x3846_4947)?;
@@ -778,23 +943,17 @@ fn worker(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
     code.jne(failed)?;
     code.set_label(&mut gif)?;
     code.mov(ecx, 0x6669_672e)?;
-    code.jmp(assigned)?;
-    for (_, extension, label) in &mut extensions {
-        code.set_label(label)?;
-        let bytes = extension.as_bytes();
-        code.mov(ecx, u32::from_le_bytes(bytes[..4].try_into()?))?;
-        if let Some(last) = bytes.get(4) {
-            code.mov(r9b, i32::from(*last))?;
-            code.jmp(long)?;
-        } else {
-            code.jmp(assigned)?;
-        }
-    }
-    code.set_label(&mut long)?;
-    code.inc(edx)?;
+    code.mov(edx, 4)?;
+    code.xor(r9d, r9d)?;
     code.set_label(&mut assigned)?;
-    code.mov(dword_ptr(rbp + suffix), ecx)?;
-    code.mov(byte_ptr(rbp + suffix + 4), r9b)?;
+    code.lea(rax, ptr(rbp + suffix))?;
+    code.cmp(qword_ptr(rax + 24), 16)?;
+    code.jb(inline)?;
+    code.mov(rax, qword_ptr(rax))?;
+    code.set_label(&mut inline)?;
+    code.mov(dword_ptr(rax), ecx)?;
+    code.mov(byte_ptr(rax + 4), r9b)?;
+    code.mov(byte_ptr(rax + 5), 0)?;
     code.mov(qword_ptr(rbp + suffix + 16), rdx)?;
     let destination_start = string_cleanups(&body, destination)?
         .first()
@@ -831,7 +990,7 @@ fn worker(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
     let states = image.exception_states(native.worker.start)?;
     let construction = states
         .iter()
-        .find(|state| state.state == 1 && state.instruction > body[filename].ip())
+        .find(|state| state.instruction > body[filename].ip())
         .ok_or("找不到复制目标构造后的异常状态")?
         .instruction;
     let construction = position(&body, construction)?;
@@ -907,8 +1066,7 @@ fn compact_string(body: &mut Body<'_, '_>, destroy: u64) -> Result<()> {
 fn schedule(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
     let mut output = Body::new(image, &native.schedule)?;
     let body = output.original.clone();
-    let (_, exists) = calls(&body).nth(1).ok_or("找不到资源路径检查")?;
-    let exists = call(&body, exists)?;
+    let exists = call(&body, native.exists)?;
     let test = body[exists + 1..]
         .iter()
         .position(|instruction| instruction.mnemonic() == Mnemonic::Test)
@@ -958,7 +1116,7 @@ fn filename(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
 fn clipboard(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
     let mut output = Body::new(image, &native.copy)?;
     let body = output.original.clone();
-    let index = calls(&body).next().ok_or("找不到剪贴板图片类型检查")?.0 + 1;
+    let index = call(&body, native.image_check)? + 1;
     if body[index].mnemonic() != Mnemonic::Mov
         || body[index].op0_register() != Register::BL
         || body[index].op1_register() != Register::AL
@@ -976,7 +1134,7 @@ fn clipboard(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
 fn menu(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
     let mut output = Body::new(image, &native.menu)?;
     let body = output.original.clone();
-    let (table, _) = unique(method_tables(image, &body)?, "表情菜单回调")?;
+    let table = unique(tables(image, &body)?, "表情菜单回调")?;
     let table_index = unique(
         body.iter()
             .enumerate()
