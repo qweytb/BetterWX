@@ -7,10 +7,10 @@ use std::{
 };
 
 use iced_x86::{
-    Code, Decoder, DecoderOptions, Encoder, Instruction, MemoryOperand, Mnemonic, OpKind, Register,
+    Code, Decoder, DecoderOptions, Instruction, MemoryOperand, Mnemonic, OpKind, Register,
     code_asm::{
-        CodeAssembler, byte_ptr, dword_ptr, eax, ecx, edi, edx, esi, ptr, r8, r8d, r9, r9d, r10,
-        r10b, r10d, r11, rax, rbp, rcx, rdi, rdx, rsi, rsp, word_ptr,
+        CodeAssembler, al, byte_ptr, dl, dword_ptr, eax, ecx, edi, edx, esi, ptr, r8d, r9, r9d,
+        r10, r11, rax, rbp, rcx, rdi, rdx, rsi, rsp, word_ptr,
     },
 };
 
@@ -23,14 +23,12 @@ use crate::{
 };
 
 const INIT: &str = "kernel::datapathutil::InitDirs";
-const LOCK: &str = "kernel::datapathutil::LockProcessExclusiveFile";
-const FORWARD: &str = "kernel::service::NativeIpcService::ForwardToExistedProcess";
 const OTHER: &str = "kernel::service::NativeIpcService::ForwardExistedProcessExceptSelf";
-const RECEIVE: &str = "kernel::service::NativeIpcService::OnReceiveMessage";
 const WINDOW: &str = "xWechatWindow";
 const MUTEX: &str = "XWeChat_App_Instance_Identity_Mutex_Name";
 const CLASS: &str = "Chrome_MessageWindow";
-const FUNCTIONS: &[&str] = &[INIT, LOCK, FORWARD, OTHER, RECEIVE];
+const LOCKED: &str = "mmkv_key_logout_locked_flag";
+const FUNCTIONS: &[&str] = &[INIT, OTHER, LOCKED];
 const KEYS: &[&str] = &[
     "mmkv_key_user_name",
     "mmkv_key_auto_login_flag",
@@ -40,7 +38,7 @@ const KEYS: &[&str] = &[
     "mmkv_key_head_img_url",
     "mmkv_key_pc_account_name",
     "mmkv_key_server_id",
-    "mmkv_key_logout_locked_flag",
+    LOCKED,
 ];
 
 pub const FEATURE: Feature = Feature {
@@ -242,7 +240,7 @@ fn address(symbols: &Symbols, name: &str) -> Result<u64> {
 }
 
 fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
-    let mut symbols = xlog::find(image, FUNCTIONS, progress)?;
+    let mut symbols = xlog::find(image, &[INIT, OTHER], progress)?;
     for name in [WINDOW, MUTEX] {
         symbols.insert(name.to_owned(), image.find(name, &wide(name), progress)?);
         address(&symbols, name)?;
@@ -250,11 +248,7 @@ fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
     symbols.insert(CLASS.to_owned(), image.find(CLASS, &wide(CLASS), progress)?);
     for &key in KEYS {
         let bytes: Vec<_> = key.bytes().chain([0]).collect();
-        let locations = image.find(key, &bytes, progress)?;
-        let [location] = locations[..] else {
-            return Err(format!("无法唯一定位登录配置键 {key}").into());
-        };
-        symbols.insert(key.to_owned(), image.pointers(location)?);
+        symbols.insert(key.to_owned(), image.find(key, &bytes, progress)?);
         address(&symbols, key)?;
     }
     Ok(symbols)
@@ -291,26 +285,7 @@ impl Analysis for Scan {
         if found.len() != FUNCTIONS.len() {
             return Ok(Vec::new());
         }
-        let constructors: BTreeMap<_, _> = functions(WINDOW, &self.symbols, references)
-            .into_iter()
-            .filter(|(start, _)| found.values().all(|function| function.start != *start))
-            .collect();
-        let mut creators = Vec::new();
-        for function in constructors.values() {
-            if image.instructions(function)?.iter().any(|instruction| {
-                instruction.code() == Code::Call_rel32_64
-                    && constructors.contains_key(&instruction.near_branch_target())
-            }) {
-                creators.push(function.clone());
-            }
-        }
-        if creators.len() > 1 {
-            return Err("无法唯一定位消息窗口创建函数".into());
-        }
-        let Some(creator) = creators.pop() else {
-            return Ok(Vec::new());
-        };
-        let edits = prepare(image, &self.symbols, &found, &creator, references, progress)?;
+        let edits = prepare(image, &self.symbols, &found, references, progress)?;
         self.emitted = true;
         Ok(edits)
     }
@@ -475,12 +450,23 @@ fn destructor(
 fn initialize(
     image: &Image<'_>,
     function: &Range<u64>,
-    storage: Range<u64>,
-    template: u64,
-    count: usize,
-    filename: u64,
+    symbols: &Symbols,
+    locked: u64,
+    imports: &Symbols,
     references: &References,
 ) -> Result<Vec<Edit>> {
+    let mut targets = KEYS
+        .iter()
+        .map(|key| Ok(address(symbols, key)? + key.len() as u64 - 1))
+        .collect::<Result<Vec<_>>>()?;
+    for name in [MUTEX, WINDOW] {
+        targets.push(address(symbols, name)? + (name.len() as u64 - 1) * 2);
+    }
+    targets.sort_unstable();
+    let first = targets[0];
+    let size = u32::try_from(targets[targets.len() - 1] - first + 1)?;
+    image.data(first, size as usize)?;
+    let protect = address(imports, "VirtualProtect")?;
     let body = image.instructions(function)?;
     let failures: Vec<_> =
         body.windows(4)
@@ -547,28 +533,14 @@ fn initialize(
     let drop = destructor(image, &body, &cleanup, references)?;
     let mut code = CodeAssembler::new(64)?;
     let mut separator = code.create_label();
-    let mut write = code.create_label();
     let mut done = code.create_label();
-    code.mov(r9, rsi)?;
-    code.mov(r11, rdi)?;
-    code.add_instruction(Instruction::with2(
-        Code::Lea_r64_m,
-        Register::RDI,
-        relative(storage.start),
-    )?)?;
-    code.add_instruction(Instruction::with2(
-        Code::Lea_r64_m,
-        Register::RSI,
-        relative(template),
-    )?)?;
-    code.mov(ecx, u32::try_from(storage.end - storage.start)?)?;
-    code.rep().movsb()?;
-    code.mov(rsi, r9)?;
-    code.mov(rdi, r11)?;
     code.xor(ecx, ecx)?;
     code.lea(rdx, ptr(rsp + 32))?;
     code.mov(r8d, 260)?;
-    code.add_instruction(Instruction::with1(Code::Call_rm64, relative(filename))?)?;
+    code.add_instruction(Instruction::with1(
+        Code::Call_rm64,
+        relative(address(imports, "GetModuleFileNameW")?),
+    )?)?;
     code.test(eax, eax)?;
     code.je(failure)?;
     code.cmp(eax, 260)?;
@@ -584,29 +556,48 @@ fn initialize(
     code.jb(done)?;
     code.cmp(word_ptr(rdx + rax * 2 - 4), 92)?;
     code.jne(done)?;
-    code.movzx(r10d, word_ptr(rdx + rax * 2 - 2))?;
-    code.and(r10d, -33)?;
-    code.mov(r9d, r10d)?;
-    code.sub(r9d, i32::from(b'A'))?;
-    code.cmp(r9d, i32::from(b'Z' - b'A'))?;
+    code.movzx(eax, word_ptr(rdx + rax * 2 - 2))?;
+    code.and(eax, -33)?;
+    code.lea(ecx, ptr(rax - i32::from(b'A')))?;
+    code.cmp(ecx, i32::from(b'Z' - b'A'))?;
     code.ja(done)?;
+    code.mov(byte_ptr(rsp + 40), al)?;
     code.add_instruction(Instruction::with2(
         Code::Lea_r64_m,
         Register::RCX,
-        relative(storage.start),
+        relative(first),
     )?)?;
+    code.mov(edx, size)?;
+    code.mov(r8d, 8)?;
+    code.lea(r9, ptr(rsp + 32))?;
+    code.add_instruction(Instruction::with1(Code::Call_rm64, relative(protect))?)?;
+    code.test(eax, eax)?;
+    code.je(failure)?;
+    code.mov(dl, byte_ptr(rsp + 40))?;
+    for target in targets {
+        code.add_instruction(Instruction::with2(
+            Code::Mov_rm8_r8,
+            relative(target),
+            Register::DL,
+        )?)?;
+    }
+    code.add_instruction(Instruction::with2(
+        Code::Mov_r64_rm64,
+        Register::RAX,
+        relative(locked),
+    )?)?;
+    code.mov(byte_ptr(rax + LOCKED.len() as i32 - 1), dl)?;
     code.add_instruction(Instruction::with2(
         Code::Lea_r64_m,
-        Register::RAX,
-        relative(template + storage.end - storage.start),
+        Register::RCX,
+        relative(first),
     )?)?;
-    code.mov(edx, u32::try_from(count)?)?;
-    code.set_label(&mut write)?;
-    code.movzx(r8d, word_ptr(rax))?;
-    code.mov(byte_ptr(rcx + r8), r10b)?;
-    code.add(rax, 2)?;
-    code.dec(edx)?;
-    code.jnz(write)?;
+    code.mov(edx, size)?;
+    code.mov(r8d, dword_ptr(rsp + 32))?;
+    code.lea(r9, ptr(rsp + 36))?;
+    code.add_instruction(Instruction::with1(Code::Call_rm64, relative(protect))?)?;
+    code.test(eax, eax)?;
+    code.je(failure)?;
     code.set_label(&mut done)?;
     code.nop()?;
     let staging = image.end();
@@ -783,88 +774,41 @@ fn prepare(
     image: &Image<'_>,
     symbols: &Symbols,
     found: &BTreeMap<&str, Range<u64>>,
-    creator: &Range<u64>,
     references: &References,
     progress: &Progress,
 ) -> Result<Vec<Edit>> {
     let step = progress.activity("准备共存数据");
-    let mut pool = Vec::new();
-    let mut offsets = Vec::new();
-    let mut bindings = Vec::new();
-    for &key in KEYS {
-        bindings.push((address(symbols, key)?, pool.len()));
-        pool.extend_from_slice(key.as_bytes());
-        offsets.push(pool.len() - 1);
-        pool.push(0);
-    }
-    pool.resize(pool.len().next_multiple_of(16), 0);
-    let mutex = pool.len();
-    pool.extend(wide(MUTEX));
-    offsets.push(pool.len() - 4);
-    let window = pool.len();
-    pool.extend(wide(WINDOW));
-    offsets.push(pool.len() - 4);
-    let mut template = pool.clone();
-    for &offset in &offsets {
-        template.extend_from_slice(&u16::try_from(offset)?.to_le_bytes());
-    }
-    let (storage, mut edits) = image.reserve(".data", &vec![0; pool.len()], 16)?;
-    let (template_address, data_edits) = image.reserve(".rdata", &template, 2)?;
-    edits.extend(data_edits);
-    for (pointer, relative) in bindings {
-        let offset = image.offset(pointer)?;
-        edits.push(Edit {
-            range: offset..offset + 8,
-            bytes: (storage + relative as u64).to_le_bytes().to_vec(),
-        });
-    }
-    for function in [&found[LOCK], creator, &found[FORWARD]] {
-        for mut instruction in image.instructions(function)? {
-            if !instruction.is_ip_rel_memory_operand() {
-                continue;
-            }
-            let target = instruction.ip_rel_memory_address();
-            for (name, relative) in [(MUTEX, mutex), (WINDOW, window)] {
-                let source = address(symbols, name)?;
-                if !(source..source + wide(name).len() as u64).contains(&target) {
-                    continue;
-                }
-                let target = storage + relative as u64 + target - source;
-                if instruction.mnemonic() == Mnemonic::Movaps && !target.is_multiple_of(16) {
-                    return Err("实例名称未满足向量读取的对齐要求".into());
-                }
-                instruction.set_memory_displacement64(target);
-                let mut encoder = Encoder::new(64);
-                encoder.encode(&instruction, instruction.ip())?;
-                let bytes = encoder.take_buffer();
-                if bytes.len() != instruction.len() {
-                    return Err("实例名称引用的指令长度改变".into());
-                }
-                let offset = image.offset(instruction.ip())?;
-                edits.push(Edit {
-                    range: offset..offset + bytes.len(),
-                    bytes,
-                });
-            }
-        }
-    }
-    step.finish(format!(
-        "{} 个登录键；数据 {} 字节；模板 {} 字节",
-        KEYS.len(),
-        pool.len(),
-        template.len(),
-    ));
+    let constructor = image.instructions(&found[LOCKED])?;
+    let objects: Vec<_> = constructor
+        .iter()
+        .filter(|instruction| {
+            instruction.code() == Code::Mov_rm64_r64
+                && instruction.is_ip_rel_memory_operand()
+                && instruction.op1_register() == Register::RAX
+        })
+        .map(Instruction::ip_rel_memory_address)
+        .filter(|object| {
+            [16, 24].iter().all(|&offset| {
+                constructor.iter().any(|instruction| {
+                    instruction.code() == Code::Mov_rm64_imm32
+                        && instruction.is_ip_rel_memory_operand()
+                        && instruction.ip_rel_memory_address() == object + offset
+                        && if offset == 16 {
+                            instruction.immediate32() == LOCKED.len() as u32
+                        } else {
+                            instruction.immediate32() >= LOCKED.len() as u32
+                        }
+                })
+            })
+        })
+        .collect();
+    let [locked] = objects[..] else {
+        return Err("无法唯一定位锁定配置键对象".into());
+    };
+    step.finish(format!("{LOCKED}；RVA 0x{:08X}", locked - image.base(),));
     let imports = image.imports()?;
     let step = progress.activity("准备目录身份初始化");
-    edits.extend(initialize(
-        image,
-        &found[INIT],
-        storage..storage + pool.len() as u64,
-        template_address,
-        offsets.len(),
-        address(&imports, "GetModuleFileNameW")?,
-        references,
-    )?);
+    let mut edits = initialize(image, &found[INIT], symbols, locked, &imports, references)?;
     step.finish(format!(
         "{INIT}；RVA 0x{:08X}",
         found[INIT].start - image.base()
