@@ -7,8 +7,8 @@ use std::{
 };
 
 use iced_x86::{
-    BlockEncoder, BlockEncoderOptions, Decoder, DecoderOptions, FastFormatter, Instruction,
-    InstructionBlock, OpKind, code_asm::CodeAssembler,
+    BlockEncoder, BlockEncoderOptions, Code, Decoder, DecoderOptions, FastFormatter, Instruction,
+    InstructionBlock, Mnemonic, OpKind, Register, code_asm::CodeAssembler,
 };
 use object::endian::LittleEndian as LE;
 use object::pe;
@@ -27,6 +27,34 @@ pub struct ExceptionState {
 
 pub fn assembly(bytes: &[u8], address: u64) -> String {
     format(Decoder::with_ip(64, bytes, address, DecoderOptions::NONE))
+}
+
+pub fn calls(body: &[Instruction]) -> impl DoubleEndedIterator<Item = (usize, u64)> + '_ {
+    body.iter().enumerate().filter_map(|(index, instruction)| {
+        (instruction.code() == Code::Call_rel32_64)
+            .then_some((index, instruction.near_branch_target()))
+    })
+}
+
+pub fn argument(body: &[Instruction], index: usize, register: Register) -> Result<Instruction> {
+    body[..index]
+        .iter()
+        .rev()
+        .take_while(|instruction| instruction.mnemonic() != Mnemonic::Call)
+        .find(|instruction| {
+            instruction.op0_kind() == OpKind::Register
+                && instruction.op0_register().full_register() == register.full_register()
+        })
+        .copied()
+        .ok_or_else(|| format!("找不到参数寄存器 {register:?}").into())
+}
+
+pub fn literal(body: &[Instruction], index: usize, register: Register) -> Result<u64> {
+    let argument = argument(body, index, register)?;
+    if argument.mnemonic() != Mnemonic::Lea || !argument.is_ip_rel_memory_operand() {
+        return Err("参数不是静态地址".into());
+    }
+    Ok(argument.ip_rel_memory_address())
 }
 
 fn format(instructions: impl IntoIterator<Item = Instruction>) -> String {

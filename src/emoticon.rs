@@ -14,7 +14,7 @@ use iced_x86::{
 use crate::{
     Result,
     feature::{Analysis, Edit, Feature, Mode, Target},
-    image::{Image, References, Symbols, functions},
+    image::{Image, References, Symbols, argument, calls, functions, literal},
     progress::Progress,
     xlog,
 };
@@ -177,13 +177,6 @@ fn function(image: &Image<'_>, address: u64) -> Result<Range<u64>> {
         .ok_or_else(|| format!("找不到函数：{address:#x}").into())
 }
 
-fn calls(body: &[Instruction]) -> impl DoubleEndedIterator<Item = (usize, u64)> + '_ {
-    body.iter().enumerate().filter_map(|(index, instruction)| {
-        (instruction.code() == Code::Call_rel32_64)
-            .then_some((index, instruction.near_branch_target()))
-    })
-}
-
 fn call(body: &[Instruction], target: u64) -> Result<usize> {
     unique(
         calls(body)
@@ -191,27 +184,6 @@ fn call(body: &[Instruction], target: u64) -> Result<usize> {
             .collect(),
         "原生函数调用",
     )
-}
-
-fn argument(body: &[Instruction], index: usize, register: Register) -> Result<Instruction> {
-    body[..index]
-        .iter()
-        .rev()
-        .take_while(|instruction| instruction.mnemonic() != Mnemonic::Call)
-        .find(|instruction| {
-            instruction.op0_kind() == OpKind::Register
-                && instruction.op0_register().full_register() == register.full_register()
-        })
-        .copied()
-        .ok_or_else(|| format!("找不到参数寄存器 {register:?}").into())
-}
-
-fn literal(body: &[Instruction], index: usize, register: Register) -> Result<u64> {
-    let argument = argument(body, index, register)?;
-    if argument.mnemonic() != Mnemonic::Lea || !argument.is_ip_rel_memory_operand() {
-        return Err("参数不是静态地址".into());
-    }
-    Ok(argument.ip_rel_memory_address())
 }
 
 fn stack_argument(body: &[Instruction], index: usize, register: Register) -> Result<i64> {

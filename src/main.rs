@@ -1,3 +1,4 @@
+mod browser;
 mod coexist;
 mod credentials;
 mod debug;
