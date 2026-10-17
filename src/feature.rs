@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    Result, coexist, credentials, debug,
+    Result, coexist, credentials, debug, emoticon,
     image::{Image, References, Symbols},
     login, notify,
     progress::Progress,
@@ -164,6 +164,7 @@ pub const FEATURES: &[Feature] = &[
     credentials::FEATURE,
     revoke::FEATURE,
     resources::FEATURE,
+    emoticon::FEATURE,
     notify::FEATURE,
     uia::FEATURE,
     debug::FEATURE,

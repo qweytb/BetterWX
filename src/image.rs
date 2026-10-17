@@ -471,7 +471,12 @@ impl<'a> Image<'a> {
         let mut bytes = result.code_buffer;
         let length = usize::try_from(function.end - function.start)?;
         if bytes.len() > length {
-            return Err("原函数的指令空间不足".into());
+            return Err(format!(
+                "RVA {:#x} 的指令空间不足：需要 {} 字节，可用 {length} 字节",
+                function.start - self.base(),
+                bytes.len(),
+            )
+            .into());
         }
         let unwind = self.data(self.unwind_info(function.start)?, 4)?;
         let prologue = usize::from(unwind[1]);

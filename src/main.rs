@@ -1,6 +1,7 @@
 mod coexist;
 mod credentials;
 mod debug;
+mod emoticon;
 mod feature;
 mod image;
 mod install;
