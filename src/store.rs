@@ -8,7 +8,7 @@ use std::{
 
 use tempfile::NamedTempFile;
 
-use crate::{Result, progress::Progress};
+use crate::{Result, install, progress::Progress};
 
 pub struct Store {
     pub target: PathBuf,
@@ -94,13 +94,26 @@ impl Store {
 
     pub fn load(&mut self, target: &Path, progress: &Progress) -> Result<&File> {
         let target = fs::canonicalize(target)?;
+        let backup = self.backup(&target)?;
         Ok(match self.files.entry(target) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
-                let file = File::open(entry.key(), progress)?;
+                let file = File::open(entry.key(), backup, progress)?;
                 entry.insert(file)
             }
         })
+    }
+
+    fn backup(&self, target: &Path) -> Result<PathBuf> {
+        let directory = target.parent().ok_or("目标文件缺少父目录")?;
+        if Some(directory) == self.target.parent() {
+            return Ok(target.with_added_extension("bak"));
+        }
+        let name = target.file_name().ok_or("目标文件缺少名称")?;
+        Ok(directory
+            .join(install::version(target)?)
+            .join(name)
+            .with_added_extension("bak"))
     }
 
     pub fn write_error(&self, targets: &[PathBuf]) -> Option<String> {
@@ -115,7 +128,7 @@ impl Store {
 
     pub fn load_backups(&mut self, targets: &[PathBuf], progress: &Progress) -> Result<()> {
         for target in targets {
-            if target.with_added_extension("bak").try_exists()? {
+            if target.try_exists()? && self.backup(target)?.try_exists()? {
                 self.load(target, progress)?;
             }
         }
@@ -163,9 +176,8 @@ impl Store {
 }
 
 impl File {
-    fn open(target: &Path, progress: &Progress) -> Result<Self> {
+    fn open(target: &Path, backup: PathBuf, progress: &Progress) -> Result<Self> {
         let current = Arc::new(read(target, progress, "载入文件")?);
-        let backup = target.with_added_extension("bak");
         let original = if backup.try_exists()? {
             Arc::new(read(&backup, progress, "载入文件")?)
         } else {
@@ -190,6 +202,7 @@ impl File {
             return Err(format!("读取后目标文件发生了变化：{}", display(&self.target)).into());
         }
         if !self.backup.try_exists()? {
+            fs::create_dir_all(self.backup.parent().ok_or("备份文件缺少父目录")?)?;
             write(&self.backup, &self.original, progress)?;
         }
         write(&self.target, &content.data, progress)?;
