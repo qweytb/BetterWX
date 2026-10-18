@@ -32,13 +32,14 @@ const BUFFER: &str = "kernel::manager::EmoticonManager::GetEmoticonDataWithMd5";
 const INFO: &str = "kernel::EmoticonMsgInfo::GenMsgInfoFromMessage";
 const EXTRA: &str = "virtual kernel::EmoticonMessageExtInfo::CopyFromOriginOnForward";
 const READ: &str = "kernel::manager::ReadEmoticonData";
+const SYNC_READ: &str = "kernel::manager::SyncReadEmoticonData";
 const FORMAT: &str = "kernel::imageutil::GetImageFormat";
 const EXTENSION: &str = "kernel::imageutil::GetImageFormatStr";
 const WRITE: &str = "kernel::fileutil::WriteFile";
 const TEMP: &str = "RWTemp";
 const NAMES: &[&str] = &[
     MENU, CONSTRUCT, CLICK, RECORD, PREVIEW, COPY, EXPORT, DOWNLOAD, BUFFER, INFO, EXTRA, READ,
-    FORMAT, EXTENSION, WRITE,
+    SYNC_READ, FORMAT, EXTENSION, WRITE,
 ];
 
 pub const FEATURE: Feature = Feature {
@@ -700,7 +701,7 @@ impl Native {
             shared_destroy,
             set_destroy,
             key,
-            read,
+            read: named(SYNC_READ)?.start,
             image_check: image_check.1,
             format,
             extension,
