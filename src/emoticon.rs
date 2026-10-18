@@ -6,8 +6,8 @@ use std::{
 use iced_x86::{
     Code, Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register,
     code_asm::{
-        CodeAssembler, al, bl, byte_ptr, dword_ptr, eax, ecx, edx, ptr, qword_ptr, r8, r8d, r9,
-        r9b, r9d, r12, r14, rax, rbp, rbx, rcx, rdi, rdx, rsi, rsp, word_ptr, xmm0,
+        CodeAssembler, al, bl, byte_ptr, dword_ptr, eax, ecx, edx, esi, ptr, qword_ptr, r8, r8d,
+        r9, r9b, r9d, r12, r14, rax, rbp, rbx, rcx, rdi, rdx, rsi, rsp, word_ptr, xmm0, xmm6,
     },
 };
 
@@ -33,13 +33,14 @@ const INFO: &str = "kernel::EmoticonMsgInfo::GenMsgInfoFromMessage";
 const EXTRA: &str = "virtual kernel::EmoticonMessageExtInfo::CopyFromOriginOnForward";
 const READ: &str = "kernel::manager::ReadEmoticonData";
 const SYNC_READ: &str = "kernel::manager::SyncReadEmoticonData";
+const CONVERT: &str = "kernel::imageutil::ConvertWxam2Jpg";
 const FORMAT: &str = "kernel::imageutil::GetImageFormat";
 const EXTENSION: &str = "kernel::imageutil::GetImageFormatStr";
 const WRITE: &str = "kernel::fileutil::WriteFile";
 const TEMP: &str = "RWTemp";
 const NAMES: &[&str] = &[
     MENU, CONSTRUCT, CLICK, RECORD, PREVIEW, COPY, EXPORT, DOWNLOAD, BUFFER, INFO, EXTRA, READ,
-    SYNC_READ, FORMAT, EXTENSION, WRITE,
+    SYNC_READ, CONVERT, FORMAT, EXTENSION, WRITE,
 ];
 
 pub const FEATURE: Feature = Feature {
@@ -62,6 +63,8 @@ struct Native {
     copy: Range<u64>,
     schedule: Range<u64>,
     worker: Range<u64>,
+    convert: Range<u64>,
+    encoder: Range<u64>,
     filename: Range<u64>,
     click: Range<u64>,
     delegate: Range<u64>,
@@ -79,6 +82,8 @@ struct Native {
     string_destroy: u64,
     shared_destroy: u64,
     set_destroy: u64,
+    data_destroy: u64,
+    utf8: u64,
     key: u64,
     read: u64,
     image_check: u64,
@@ -383,6 +388,38 @@ impl Native {
             "复制文件命名函数",
         )?;
         let format_call = call(&worker_body, extension)?;
+        let text = stack_argument(&worker_body, format_call, Register::RDX)?;
+        let utf8 = unique(
+            calls(&worker_body[..format_call])
+                .filter_map(|(index, target)| {
+                    stack_argument(&worker_body, index, Register::RDX)
+                        .is_ok_and(|slot| slot == text)
+                        .then_some(target)
+                })
+                .collect(),
+            "资源路径文字转换",
+        )?;
+        let convert = named(CONVERT)?;
+        let convert_body = image.instructions(&convert)?;
+        let encoder = unique(
+            calls(&convert_body)
+                .filter_map(|(index, target)| {
+                    argument(&convert_body, index, Register::R8D)
+                        .is_ok_and(|argument| {
+                            argument.code() == Code::Mov_r32_imm32 && argument.immediate32() == 3
+                        })
+                        .then_some(target)
+                })
+                .collect(),
+            "WXGF 编码接口",
+        )?;
+        let encoder = function(image, encoder)?;
+        let data_destroy = unique(
+            calls(&cleanup(image, &encoder, 0)?)
+                .map(|(_, target)| target)
+                .collect(),
+            "图像数据清理函数",
+        )?;
         let filename_call = call(&worker_body, filename.start)?;
         let check = unique(
             worker_body
@@ -683,6 +720,8 @@ impl Native {
             copy,
             schedule,
             worker,
+            convert,
+            encoder,
             filename,
             click,
             delegate,
@@ -700,6 +739,8 @@ impl Native {
             string_destroy,
             shared_destroy,
             set_destroy,
+            data_destroy,
+            utf8,
             key,
             read: named(SYNC_READ)?.start,
             image_check: image_check.1,
@@ -837,19 +878,15 @@ fn worker(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
 
     let mut code = CodeAssembler::new(64)?;
     let mut ordinary = code.create_label();
-    let mut identify = code.create_label();
     let mut gif = code.create_label();
     let mut assigned = code.create_label();
-    let mut inline = code.create_label();
     code.cmp(dword_ptr(r14 + 8), 47)?;
     code.jne(ordinary)?;
     code.mov(rcx, qword_ptr(r14 + native.extra_field))?;
-    code.test(rcx, rcx)?;
-    code.jz(failed)?;
     code.xor(edx, edx)?;
     code.lea(r8, ptr(Register::RIP) + native.base_type)?;
     code.lea(r9, ptr(Register::RIP) + native.emoticon_type)?;
-    code.mov(qword_ptr(rsp + 32), 0)?;
+    code.mov(dword_ptr(rsp + 32), 0)?;
     code.call(native.cast)?;
     code.test(rax, rax)?;
     code.jz(failed)?;
@@ -858,23 +895,28 @@ fn worker(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
     code.call(native.key)?;
     code.lea(rcx, ptr(rbp + owner))?;
     code.mov(rdx, rbx)?;
-    code.lea(r8, ptr(rbp + suffix))?;
+    code.mov(r8, rax)?;
     code.xor(r9d, r9d)?;
     code.call(native.read)?;
-    code.mov(rbx, qword_ptr(rbp + owner))?;
+    code.mov(rbx, qword_ptr(rax))?;
     code.test(rbx, rbx)?;
     code.jz(failed)?;
     code.cmp(qword_ptr(rbx + 16), 12)?;
     code.jb(failed)?;
     code.mov(rcx, rbx)?;
     code.cmp(qword_ptr(rbx + 24), 16)?;
-    code.jb(identify)?;
-    code.mov(rcx, qword_ptr(rbx))?;
-    code.set_label(&mut identify)?;
+    code.cmovae(rcx, qword_ptr(rbx))?;
     code.mov(qword_ptr(rbp + temporary), rcx)?;
     code.call(native.format)?;
+    code.xor(esi, esi)?;
     code.mov(edx, 4)?;
     code.xor(r9d, r9d)?;
+    let mut original = code.create_label();
+    code.add_instruction(Instruction::with2(Code::Cmp_rm32_imm8, Register::EAX, 7)?)?;
+    code.jne(original)?;
+    code.inc(esi)?;
+    code.jmp(gif)?;
+    code.set_label(&mut original)?;
     let mut previous = "";
     for (kind, extension) in [
         (1, ".jpg"),
@@ -883,7 +925,6 @@ fn worker(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
         (3, ".tiff"),
         (5, ".heic"),
         (6, ".heif"),
-        (7, ".wxgf"),
         (8, ".webp"),
     ] {
         let bytes = extension.as_bytes();
@@ -909,10 +950,9 @@ fn worker(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
     code.mov(rcx, qword_ptr(rbp + temporary))?;
     code.cmp(dword_ptr(rcx), 0x3846_4947)?;
     code.jne(failed)?;
-    code.movzx(eax, word_ptr(rcx + 4))?;
-    code.cmp(eax, 0x6137)?;
+    code.cmp(word_ptr(rcx + 4), 0x6137)?;
     code.je(gif)?;
-    code.cmp(eax, 0x6139)?;
+    code.cmp(word_ptr(rcx + 4), 0x6139)?;
     code.jne(failed)?;
     code.set_label(&mut gif)?;
     code.mov(ecx, 0x6669_672e)?;
@@ -921,9 +961,7 @@ fn worker(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
     code.set_label(&mut assigned)?;
     code.lea(rax, ptr(rbp + suffix))?;
     code.cmp(qword_ptr(rax + 24), 16)?;
-    code.jb(inline)?;
-    code.mov(rax, qword_ptr(rax))?;
-    code.set_label(&mut inline)?;
+    code.cmovae(rax, qword_ptr(rax))?;
     code.mov(dword_ptr(rax), ecx)?;
     code.mov(byte_ptr(rax + 4), r9b)?;
     code.mov(byte_ptr(rax + 5), 0)?;
@@ -938,6 +976,28 @@ fn worker(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
     output.replace(image_check - 1..image_check, &mut code)?;
 
     output.replace(initial.clone(), &mut CodeAssembler::new(64)?)?;
+    let reset = unique(
+        body.windows(3)
+            .enumerate()
+            .filter_map(|(index, window)| {
+                (window[0].code() == Code::Mov_rm64_imm32
+                    && window[0].memory_base() == Register::RBP
+                    && window[0].memory_displacement64() as i64 == formats + 16
+                    && window[0].immediate32to64() == 0
+                    && window[1].code() == Code::Mov_rm64_imm32
+                    && window[1].memory_base() == Register::RBP
+                    && window[1].memory_displacement64() as i64 == formats + 24
+                    && window[1].immediate32to64() == 15
+                    && window[2].code() == Code::Mov_rm8_imm8
+                    && window[2].memory_base() == Register::RBP
+                    && window[2].memory_displacement64() as i64 == formats
+                    && window[2].immediate8() == 0)
+                    .then_some(index)
+            })
+            .collect(),
+        "已转移的图片格式临时值",
+    )?;
+    output.replace(reset..reset + 3, &mut CodeAssembler::new(64)?)?;
     destroy(
         &mut output,
         unique(string_cleanups(&body, temporary)?, "资源路径文字清理")?,
@@ -988,9 +1048,22 @@ fn worker(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
     code.mov(rdx, rbx)?;
     code.mov(r8d, 1)?;
     code.call(native.write)?;
-    code.movsxd(rdx, eax)?;
-    code.cmp(rdx, qword_ptr(rbx + 16))?;
+    code.cdqe()?;
+    code.cmp(rax, qword_ptr(rbx + 16))?;
     code.sete(bl)?;
+    code.jne(body[copied].ip())?;
+    code.test(esi, esi)?;
+    code.je(body[copied].ip())?;
+    code.lea(rcx, ptr(rbp + suffix))?;
+    code.call(native.string_destroy)?;
+    code.lea(rcx, ptr(rbp + destination))?;
+    code.lea(rdx, ptr(rbp + suffix))?;
+    code.call(native.utf8)?;
+    code.mov(rcx, rax)?;
+    code.mov(rdx, rax)?;
+    code.mov(r8d, esi)?;
+    code.call(native.convert.start)?;
+    code.mov(bl, al)?;
     code.jmp(body[copied].ip())?;
     code.set_label(&mut original)?;
     code.add_instruction(body[construction])?;
@@ -1004,6 +1077,163 @@ fn worker(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
         })
         .ok_or("找不到复制结果存储")?;
     destroy(&mut output, status + 1..copied, formats, native.set_destroy)?;
+    output.finish()
+}
+
+fn compact_data(body: &mut Body<'_, '_>, destroy: u64) -> Result<()> {
+    let function = function(body.image, destroy)?;
+    let targets: Vec<_> = body
+        .image
+        .instructions(&function)?
+        .iter()
+        .filter(|instruction| {
+            matches!(instruction.mnemonic(), Mnemonic::Call | Mnemonic::Jmp)
+                && instruction.op0_kind() == OpKind::NearBranch64
+                && !function.contains(&instruction.near_branch_target())
+        })
+        .map(Instruction::near_branch_target)
+        .collect();
+    if targets.is_empty() {
+        return Err("找不到图像数据清理调用".into());
+    }
+    let original = body.original.clone();
+    for (index, window) in original.windows(3).enumerate() {
+        let register = window[0].op0_register();
+        if window[0].code() != Code::Mov_r64_rm64
+            || window[0].op1_kind() != OpKind::Memory
+            || window[1].mnemonic() != Mnemonic::Test
+            || window[1].op0_register() != register
+            || window[1].op1_register() != register
+            || window[2].mnemonic() != Mnemonic::Je
+        {
+            continue;
+        }
+        let target = window[2].near_branch_target();
+        let mut end = position(&original, target)?;
+        if end <= index {
+            let Some(jump) = original[index + 3..].iter().position(|instruction| {
+                instruction.mnemonic() == Mnemonic::Jmp
+                    && instruction.near_branch_target() == target
+            }) else {
+                continue;
+            };
+            end = index + 4 + jump;
+        }
+        let cleanup = &original[index..end];
+        if calls(cleanup).map(|(_, target)| target).collect::<Vec<_>>() != targets {
+            continue;
+        }
+        let saved = cleanup.iter().find(|instruction| {
+            instruction.mnemonic() == Mnemonic::Mov
+                && instruction.op0_kind() == OpKind::Register
+                && instruction.op1_kind() == OpKind::Register
+                && instruction.op1_register() == Register::EAX
+        });
+        let mut code = CodeAssembler::new(64)?;
+        if let Some(saved) = saved {
+            code.add_instruction(*saved)?;
+        }
+        let mut address = window[0];
+        address.set_code(Code::Lea_r64_m);
+        address.set_op0_register(Register::RCX);
+        code.add_instruction(address)?;
+        code.call(destroy)?;
+        if let Some(saved) = saved {
+            code.add_instruction(Instruction::with2(
+                Code::Mov_r32_rm32,
+                Register::EAX,
+                saved.op0_register(),
+            )?)?;
+        }
+        if original[end - 1].mnemonic() == Mnemonic::Jmp {
+            code.add_instruction(original[end - 1])?;
+        }
+        body.replace(index..end, &mut code)?;
+    }
+    Ok(())
+}
+
+fn encoder(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
+    let mut output = Body::new(image, &native.encoder)?;
+    let body = output.original.clone();
+    let guard = unique(
+        body.windows(2)
+            .enumerate()
+            .filter_map(|(index, window)| {
+                (window[0].mnemonic() == Mnemonic::Cmp
+                    && window[0].op0_register() == Register::R8D
+                    && window[0].op1_kind() == OpKind::Immediate8to32
+                    && window[0].immediate8to32() == 3
+                    && window[1].mnemonic() == Mnemonic::Jne)
+                    .then_some(index)
+            })
+            .collect(),
+        "WXGF 输出格式条件",
+    )?;
+    let options = unique(
+        body.iter()
+            .enumerate()
+            .filter_map(|(index, instruction)| {
+                (instruction.mnemonic() == Mnemonic::Movaps
+                    && instruction.op0_register() == Register::XMM6
+                    && instruction.is_ip_rel_memory_operand())
+                .then_some(index)
+            })
+            .collect(),
+        "WXGF 编码选项",
+    )?;
+    let mut code = CodeAssembler::new(64)?;
+    code.add_instruction(body[options])?;
+    code.add_instruction(body[guard])?;
+    code.je(body[guard + 1].next_ip())?;
+    code.cmp(r8d, 1)?;
+    code.jne(body[guard + 1].near_branch_target())?;
+    code.mov(eax, 3)?;
+    code.movd(xmm6, eax)?;
+    output.replace(guard..guard + 2, &mut code)?;
+    output.replace(options..options + 1, &mut CodeAssembler::new(64)?)?;
+    compact_data(&mut output, native.data_destroy)?;
+    output.finish()
+}
+
+fn convert(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
+    let mut output = Body::new(image, &native.convert)?;
+    let body = output.original.clone();
+    if !body
+        .iter()
+        .take_while(|instruction| instruction.mnemonic() != Mnemonic::Call)
+        .any(|instruction| {
+            instruction.mnemonic() == Mnemonic::Mov
+                && instruction.op0_kind() == OpKind::Register
+                && instruction.op1_kind() == OpKind::Register
+                && instruction.op0_register() == Register::RDI
+                && instruction.op1_register() == Register::RDX
+        })
+    {
+        return Err("无法识别图像转换目标路径".into());
+    }
+    let parameter = argument(&body, call(&body, native.encoder.start)?, Register::R8D)?;
+    if parameter.code() != Code::Mov_r32_imm32 || parameter.immediate32() != 3 {
+        return Err("无法识别图像转换格式参数".into());
+    }
+    let index = position(&body, parameter.ip())?;
+    let mut code = CodeAssembler::new(64)?;
+    let mut ready = code.create_label();
+    code.add_instruction(parameter)?;
+    code.mov(r9, qword_ptr(rdi + 16))?;
+    code.cmp(r9, 4)?;
+    code.jb(ready)?;
+    code.mov(rax, rdi)?;
+    code.cmp(qword_ptr(rdi + 24), 16)?;
+    code.cmovae(rax, qword_ptr(rdi))?;
+    code.mov(eax, dword_ptr(rax + r9 - 4))?;
+    code.or(eax, 0x2020_2000)?;
+    code.cmp(eax, 0x6669_672e)?;
+    code.jne(ready)?;
+    code.mov(r8d, 1)?;
+    code.set_label(&mut ready)?;
+    output.replace(index..index + 1, &mut code)?;
+    compact_data(&mut output, native.data_destroy)?;
     output.finish()
 }
 
@@ -1542,6 +1772,8 @@ impl Analysis for Scan {
         let mut edits = click(image, &native, progress)?;
         edits.extend(preview(image, &native, references)?);
         edits.extend(menu(image, &native)?);
+        edits.extend(encoder(image, &native)?);
+        edits.extend(convert(image, &native)?);
         edits.extend(worker(image, &native)?);
         edits.extend(filename(image, &native)?);
         edits.extend(clipboard(image, &native)?);
