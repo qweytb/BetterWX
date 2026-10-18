@@ -7,7 +7,7 @@ use std::{
 use crate::{
     Result, browser, coexist, credentials, debug, emoticon,
     image::{Image, References, Symbols},
-    login, notify,
+    instance, login, notify,
     progress::Progress,
     resources, revoke, sound,
     store::{self, Content, Store},
@@ -161,6 +161,7 @@ impl Prepared {
 
 pub const FEATURES: &[Feature] = &[
     login::FEATURE,
+    instance::FEATURE,
     credentials::FEATURE,
     revoke::FEATURE,
     resources::FEATURE,

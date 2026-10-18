@@ -6,6 +6,7 @@ mod emoticon;
 mod feature;
 mod image;
 mod install;
+mod instance;
 mod login;
 mod notify;
 #[cfg(windows)]
