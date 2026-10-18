@@ -9,7 +9,7 @@ use crate::{
     image::{Image, References, Symbols},
     instance, login, notify,
     progress::Progress,
-    resources, revoke, sound,
+    remote, resources, revoke, sound,
     store::{self, Content, Store},
     uia, updates,
 };
@@ -170,6 +170,7 @@ pub const FEATURES: &[Feature] = &[
     notify::FEATURE,
     uia::FEATURE,
     debug::FEATURE,
+    remote::FEATURE,
     updates::FEATURE,
     sound::FEATURE,
     coexist::FEATURE,

@@ -12,6 +12,7 @@ mod notify;
 #[cfg(windows)]
 mod process;
 mod progress;
+mod remote;
 mod resources;
 mod revoke;
 mod sound;
