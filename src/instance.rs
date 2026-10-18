@@ -4,7 +4,7 @@ use iced_x86::{Code, Instruction, OpKind, Register, code_asm::CodeAssembler};
 
 use crate::{
     Result,
-    feature::{Analysis, Edit, Feature, Mode, Target},
+    feature::{Analysis, Edit, Mode, Target},
     image::{Image, References, Symbols, assembly, functions},
     progress::Progress,
     xlog,
@@ -13,15 +13,10 @@ use crate::{
 const CHECK: &str = "kernel::multiprocess::IsMultiProcessSupported";
 const LIMIT: &str = "kernel::multiprocess::CheckMultiProcessOverLimit";
 
-pub const FEATURE: Feature = Feature {
-    id: "single-instance",
-    name: "单实例启动",
-    description: "重复打开同一入口时唤起已有窗口",
-    targets: &[Target {
-        file: None,
-        find,
-        scan,
-    }],
+pub const TARGET: Target = Target {
+    file: None,
+    find,
+    scan,
 };
 
 struct Scan {

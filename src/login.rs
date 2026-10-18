@@ -9,6 +9,7 @@ use crate::{
     Result,
     feature::{Analysis, Edit, Feature, Mode, Target},
     image::{Image, References, Symbols, functions},
+    instance,
     progress::Progress,
     xlog,
 };
@@ -21,11 +22,14 @@ pub const FEATURE: Feature = Feature {
     id: "login",
     name: "自动点击登录",
     description: "取得已有账号信息后自动触发登录",
-    targets: &[Target {
-        file: None,
-        find,
-        scan,
-    }],
+    targets: &[
+        Target {
+            file: None,
+            find,
+            scan,
+        },
+        instance::TARGET,
+    ],
 };
 
 fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
