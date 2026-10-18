@@ -11,7 +11,7 @@ use crate::{
     progress::Progress,
     remote, resources, revoke, sound,
     store::{self, Content, Store},
-    uia, updates,
+    tray, uia, updates,
 };
 
 pub type Edits = BTreeMap<PathBuf, Vec<Edit>>;
@@ -167,6 +167,7 @@ pub const FEATURES: &[Feature] = &[
     emoticon::FEATURE,
     browser::FEATURE,
     notify::FEATURE,
+    tray::FEATURE,
     uia::FEATURE,
     debug::FEATURE,
     remote::FEATURE,

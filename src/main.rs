@@ -17,6 +17,7 @@ mod resources;
 mod revoke;
 mod sound;
 mod store;
+mod tray;
 mod tui;
 mod uia;
 mod updates;
