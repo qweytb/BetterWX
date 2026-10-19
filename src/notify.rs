@@ -1567,7 +1567,7 @@ fn click(
     let saved = [rbx, rsi, rdi];
     let unwind = begin(&mut code, &saved, 0xa0)?;
     let mut cleanup = code.create_label();
-    code.mov(rsi, rdx)?;
+    code.mov(rsi, r8)?;
     code.xorps(xmm0, xmm0)?;
     code.movups(ptr(rsp + 0x20), xmm0)?;
     code.movq(qword_ptr(rsp + 0x38), xmm0)?;
@@ -1692,17 +1692,7 @@ fn delegate(image: &Image<'_>, native: &Native) -> Result<Vec<Edit>> {
     code.xor(eax, eax)?;
     code.set_label(&mut done)?;
     end(&mut code, &[], 0x28)?;
-    let mut edits = finish(image, &query, code, constants, &unwind)?;
-    let invoke = image
-        .function(pointed(image, native.delegate + 24)?)?
-        .ok_or("找不到事件委托调用函数")?;
-    let mut code = CodeAssembler::new(64)?;
-    code.mov(rdx, r8)?;
-    code.mov(rax, qword_ptr(rcx + 24))?;
-    code.mov(rcx, qword_ptr(rcx + 16))?;
-    code.jmp(rax)?;
-    edits.extend(image.replace_function(&invoke, &mut code, &[1, 0, 0, 0])?);
-    Ok(edits)
+    finish(image, &query, code, constants, &unwind)
 }
 
 fn saved_argument(instructions: &[Instruction], argument: Register) -> Result<Register> {
