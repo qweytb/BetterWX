@@ -865,7 +865,7 @@ fn finish(
     constants: Constants,
     unwind: &[u8],
 ) -> Result<Vec<Edit>> {
-    let mut cursor = function.start + code.assemble(function.start)?.len() as u64;
+    let cursor = function.start + code.assemble(function.start)?.len() as u64;
     if cursor > constants.start {
         return Err(format!(
             "RVA {:#x} 的指令空间不足：需要 {} 字节，可用 {} 字节",
@@ -875,12 +875,15 @@ fn finish(
         )
         .into());
     }
+    let mut edits = image.replace_function(function, &mut code, unwind)?;
     for (address, bytes) in constants.entries.into_iter().rev() {
-        code.db(&vec![0xcc; usize::try_from(address - cursor)?])?;
-        code.db(&bytes)?;
-        cursor = address + bytes.len() as u64;
+        let offset = image.offset(address)?;
+        edits.push(Edit {
+            range: offset..offset + bytes.len(),
+            bytes,
+        });
     }
-    image.replace_function(function, &mut code, unwind)
+    Ok(edits)
 }
 
 fn patch(image: &Image<'_>, range: Range<u64>, code: &mut CodeAssembler) -> Result<Edit> {

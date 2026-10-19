@@ -315,7 +315,7 @@ impl<'a> Image<'a> {
         code: &mut CodeAssembler,
         unwind: &[u8],
     ) -> Result<Vec<Edit>> {
-        let mut bytes = code.assemble(function.start)?;
+        let bytes = code.assemble(function.start)?;
         let size = usize::try_from(function.end - function.start)?;
         if bytes.len() > size {
             return Err(format!(
@@ -325,10 +325,9 @@ impl<'a> Image<'a> {
             )
             .into());
         }
-        bytes.resize(size, 0xcc);
         let offset = self.offset(function.start)?;
         let mut edits = vec![Edit {
-            range: offset..offset + size,
+            range: offset..offset + bytes.len(),
             bytes,
         }];
         let address = self.unwind_info(function.start)?;
@@ -408,7 +407,7 @@ impl<'a> Image<'a> {
             InstructionBlock::new(instructions, function.start),
             BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS,
         )?;
-        let mut bytes = result.code_buffer;
+        let bytes = result.code_buffer;
         let length = usize::try_from(function.end - function.start)?;
         if bytes.len() > length {
             return Err(format!(
@@ -436,10 +435,9 @@ impl<'a> Image<'a> {
             }
         }
         locations.insert(function.end, function.start + bytes.len() as u64);
-        bytes.resize(length, 0xcc);
         let offset = self.offset(function.start)?;
         let mut edits = vec![Edit {
-            range: offset..offset + length,
+            range: offset..offset + bytes.len(),
             bytes,
         }];
         for state in self.exception_states(function.start)? {
