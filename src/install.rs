@@ -99,13 +99,33 @@ pub fn version(_path: &Path) -> Result<String> {
     Err("读取系统文件版本需要 Windows".into())
 }
 
+pub fn resolve(path: PathBuf) -> Result<PathBuf> {
+    if !path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+    {
+        return Ok(path);
+    }
+    let target = path
+        .parent()
+        .ok_or("文件缺少父目录")?
+        .join(version(&path)?)
+        .join("Weixin.dll");
+    if !target.try_exists()? {
+        return Err(format!("找不到 {}", target.display()).into());
+    }
+    Ok(target)
+}
+
 #[cfg(windows)]
 pub fn pick() -> Result<Option<PathBuf>> {
-    Ok(native_dialog::DialogBuilder::file()
+    native_dialog::DialogBuilder::file()
         .set_title("手动选择")
-        .add_filter("动态库", ["dll"])
+        .add_filter("微信程序", ["exe", "dll"])
         .open_single_file()
-        .show()?)
+        .show()?
+        .map(resolve)
+        .transpose()
 }
 
 #[cfg(not(windows))]

@@ -34,15 +34,16 @@ BetterWX
 
 用法：
   betterwx
-  betterwx status [Weixin.dll]
-  betterwx enable <功能> [--mode <模式>] [Weixin.dll]
-  betterwx disable <功能> [Weixin.dll]
-  betterwx coexist <create|remove> <字母> [Weixin.dll]
-  betterwx sound import <提示音> <音频文件> [Weixin.dll]
-  betterwx sound restore <提示音> [Weixin.dll]
-  betterwx restore [Weixin.dll]
+  betterwx status [文件]
+  betterwx enable <功能> [--mode <模式>] [文件]
+  betterwx disable <功能> [文件]
+  betterwx coexist <create|remove> <字母> [文件]
+  betterwx sound import <提示音> <音频文件> [文件]
+  betterwx sound restore <提示音> [文件]
+  betterwx restore [文件]
 
 无参数启动时进入交互界面。
+文件可选 Weixin.exe 或 Weixin.dll。
 省略路径时，读取微信安装目录中的最新版本。
 系统通知头像模式：square 方形、circle 圆形。
 restore：还原已备份的原版文件。";
@@ -115,13 +116,13 @@ fn run() -> Result<()> {
     if arguments.next().is_some() {
         return Err("参数数量过多".into());
     }
-    let path = match path {
+    let path = install::resolve(match path {
         Some(path) => path,
         None => install::scan()?
             .into_iter()
             .next()
             .ok_or("安装目录中找不到微信版本")?,
-    };
+    })?;
     let progress = Progress::default();
     if remove {
         let directory = coexist::directory(&path.canonicalize()?)?;
@@ -138,7 +139,7 @@ fn run() -> Result<()> {
     } else {
         store.load_backups(&feature::targets(&store.target)?, &progress)?;
     }
-    println!("目标：{}", store::display(&path));
+    println!("目标：{}", store::display(&store.target));
     match command {
         "status" => {
             for patch in &prepared {
