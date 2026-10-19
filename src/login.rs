@@ -20,8 +20,8 @@ const REQUEST: &str = "kernel::service::LoginService::PushLoginURL";
 
 pub const FEATURE: Feature = Feature {
     id: "login",
-    name: "自动点击登录",
-    description: "取得已有账号信息后自动触发登录",
+    name: "自动登录",
+    description: "启动时自动点击登录按钮，为防止自动登录顶号，重复启动将唤起已有的窗口",
     targets: &[
         Target {
             file: None,

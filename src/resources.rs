@@ -33,7 +33,7 @@ const TRANSFERS: &[&str] = &[
 pub const FEATURE: Feature = Feature {
     id: "resources",
     name: "防止文件过期",
-    description: "自动下载图片和视频，恢复可用的本地资源",
+    description: "更积极地自动下载和保留各类资源",
     targets: &[Target {
         file: None,
         find,

@@ -13,8 +13,8 @@ const KEY: &str = "accessibility_enable_scheme\0";
 
 pub const FEATURE: Feature = Feature {
     id: "uia",
-    name: "开放无障碍访问",
-    description: "开放微信的原生无障碍控件查询",
+    name: "无障碍自动化",
+    description: "启用无障碍屏幕阅读器读取控件",
     targets: &[Target {
         file: None,
         find,

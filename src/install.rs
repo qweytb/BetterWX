@@ -102,7 +102,7 @@ pub fn version(_path: &Path) -> Result<String> {
 #[cfg(windows)]
 pub fn pick() -> Result<Option<PathBuf>> {
     Ok(native_dialog::DialogBuilder::file()
-        .set_title("选择文件")
+        .set_title("手动选择")
         .add_filter("动态库", ["dll"])
         .open_single_file()
         .show()?)

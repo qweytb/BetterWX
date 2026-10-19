@@ -1,7 +1,6 @@
 mod browser;
 mod coexist;
 mod credentials;
-mod debug;
 mod emoticon;
 mod feature;
 mod image;
@@ -46,7 +45,7 @@ BetterWX
 无参数启动时进入交互界面。
 省略路径时，读取微信安装目录中的最新版本。
 系统通知头像模式：square 方形、circle 圆形。
-restore：恢复保存的原始文件。";
+restore：还原已备份的原版文件。";
 
 fn run() -> Result<()> {
     let mut arguments = env::args_os().skip(1).peekable();
@@ -223,27 +222,22 @@ fn run() -> Result<()> {
                 None
             };
             let requested = mode.map_or(feature::State::Disabled, feature::State::Enabled);
-            let changed = patch.state(&store) != requested;
             let contents = feature::change(&store, patch, mode, &prepared, &progress)?;
             store.save(contents, &progress)?;
             if feature.id == sound::FEATURE.id && !enable {
                 sound::cleanup(&mut store, &prepared, &progress)?;
             }
-            if changed {
-                println!(
-                    "{}：{}",
-                    feature.name,
-                    if !enable {
-                        "已关闭"
-                    } else if patch.edits.as_ref().expect("modes").len() == 1 {
-                        "已启用"
-                    } else {
-                        patch.label(requested)
-                    }
-                );
-            } else {
-                println!("当前状态已符合请求");
-            }
+            println!(
+                "{}：{}",
+                feature.name,
+                if !enable {
+                    "已关闭"
+                } else if patch.edits.as_ref().expect("modes").len() == 1 {
+                    "已启用"
+                } else {
+                    patch.label(requested)
+                }
+            );
         }
         "restore" => {
             let changed = !store.changed().is_empty();
@@ -252,9 +246,9 @@ fn run() -> Result<()> {
             println!(
                 "{}",
                 if changed {
-                    "已恢复原始文件"
+                    "已恢复原版"
                 } else {
-                    "文件处于原始状态"
+                    "已是原版"
                 }
             );
         }

@@ -43,8 +43,8 @@ const KEYS: &[&str] = &[
 
 pub const FEATURE: Feature = Feature {
     id: "coexist",
-    name: "共存",
-    description: "创建或删除共存入口",
+    name: "多账号共存",
+    description: "各字母入口分别记住各自的账号，共用程序文件和聊天数据",
     targets: &[Target {
         file: None,
         find,

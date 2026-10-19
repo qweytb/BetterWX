@@ -15,8 +15,8 @@ const STOP: &str = "mmui::MessageNotificationUIService::StopFlashAndRecoverIcon"
 
 pub const FEATURE: Feature = Feature {
     id: "tray-flash",
-    name: "关闭托盘闪动",
-    description: "收到新消息时使用静止的托盘图标",
+    name: "关闭托盘闪烁",
+    description: "有新消息时不闪烁托盘图标",
     targets: &[Target {
         file: None,
         find,

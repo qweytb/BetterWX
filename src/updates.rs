@@ -12,8 +12,8 @@ const KEY: &str = "update.data\0";
 
 pub const FEATURE: Feature = Feature {
     id: "no-updates",
-    name: "关闭更新",
-    description: "关闭微信内置版本更新",
+    name: "不要更新",
+    description: "不要下载安装更新",
     targets: &[
         Target {
             file: None,

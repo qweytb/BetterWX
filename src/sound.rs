@@ -22,7 +22,7 @@ const PREFIX: &str = ":/multimedia/wav/";
 pub const FEATURE: Feature = Feature {
     id: "sound",
     name: "自定义提示音",
-    description: "替换和恢复各类提示音",
+    description: "替换消息提示音",
     targets: &[Target {
         file: None,
         find,
@@ -49,7 +49,7 @@ pub const SOUNDS: &[Sound] = &[
     },
     Sound {
         id: "call",
-        name: "通话提示",
+        name: "通话结束",
         file: "voip_phone_ending.wav",
     },
     Sound {
@@ -110,7 +110,7 @@ pub fn get(id: &str) -> Result<&'static Sound> {
 #[cfg(windows)]
 pub fn pick(sound: &Sound) -> Result<Option<PathBuf>> {
     Ok(native_dialog::DialogBuilder::file()
-        .set_title(format!("替换文件：{}", sound.name))
+        .set_title(format!("更换提示音：{}", sound.name))
         .open_single_file()
         .show()?)
 }

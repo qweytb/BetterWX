@@ -20,7 +20,7 @@ const READ: &str = "kernel::foundation::LoginConfigKV::GetBoolValueByKey";
 pub const FEATURE: Feature = Feature {
     id: "browser",
     name: "系统浏览器",
-    description: "默认使用系统浏览器打开链接和文章",
+    description: "使用系统默认浏览器打开网页",
     targets: &[Target {
         file: None,
         find,

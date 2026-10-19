@@ -75,7 +75,7 @@ const URI_IID: [u8; 16] = [
 pub const FEATURE: Feature = Feature {
     id: "notify",
     name: "系统通知",
-    description: "使用 Windows 系统通知显示新消息",
+    description: "将托盘消息菜单改为接入系统通知",
     targets: &[Target {
         file: None,
         find,

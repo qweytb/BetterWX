@@ -31,7 +31,7 @@ const FUNCTIONS: &[&str] = &[CLEAR, GET, INIT, CANCEL, BACK, MENU, AUTO, DELAY];
 pub const FEATURE: Feature = Feature {
     id: "keep-login",
     name: "保留登录信息",
-    description: "登录失败后保留账号信息并恢复登录按钮",
+    description: "登录失败时不要清理登录信息",
     targets: &[Target {
         file: None,
         find,

@@ -37,7 +37,7 @@ const FUNCTIONS: &[&str] = &[
 pub const FEATURE: Feature = Feature {
     id: "revoke",
     name: "防撤回",
-    description: "保留对方撤回的消息",
+    description: "自己的消息仍可正常撤回",
     targets: &[Target {
         file: None,
         find,

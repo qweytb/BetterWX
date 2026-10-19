@@ -641,7 +641,7 @@ fn coexist(
             },
             detail: error
                 .cloned()
-                .unwrap_or_else(|| "各字母入口分别保存登录信息".to_owned()),
+                .unwrap_or_else(|| patch.feature.description.to_owned()),
         }];
         if enabled {
             for letter in (b'A'..=b'Z').map(char::from) {
@@ -671,7 +671,7 @@ fn coexist(
         }
         items.push(Item::action(style("返回")));
         if !screen.select(
-            "共存",
+            patch.feature.name,
             &detail,
             &items,
             &mut selected,
@@ -744,7 +744,7 @@ fn sound(
     let mut notice = String::new();
     loop {
         let description = format!("{}\n重启微信后生效", store::display(&path));
-        let mut replace = Item::action(style("替换文件…"));
+        let mut replace = Item::action(style("更换提示音"));
         replace.detail = description.clone();
         let mut restore = Item::action(style("恢复默认"));
         restore.detail = description;
@@ -802,9 +802,9 @@ fn sounds(
         let mut items = vec![Item {
             marker: if enabled { "■" } else { "□" },
             label: if error.is_some() || pending {
-                patch.feature.name.to_owned().red()
+                "外置提示音支持".to_owned().red()
             } else {
-                style(patch.feature.name.to_owned())
+                style("外置提示音支持".to_owned())
             },
             value: if pending {
                 format!("结束占用进程并{}", if enabled { "关闭" } else { "开启" })
@@ -817,16 +817,18 @@ fn sounds(
             },
             detail: error
                 .cloned()
-                .unwrap_or_else(|| "使用自定义声音文件".to_owned()),
+                .unwrap_or_else(|| "启用后可以编辑外置提示音".to_owned()),
         }];
-        for sound in crate::sound::SOUNDS {
-            let mut item = Item::action(style(sound.name));
-            item.detail = store::display(&sound.path(&store.target)?);
-            items.push(item);
+        if enabled {
+            for sound in crate::sound::SOUNDS {
+                let mut item = Item::action(style(sound.name));
+                item.detail = store::display(&sound.path(&store.target)?);
+                items.push(item);
+            }
         }
         items.push(Item::action(style("返回")));
         if !screen.select(
-            "提示音",
+            patch.feature.name,
             &detail,
             &items,
             &mut selected,
@@ -933,9 +935,12 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
             })
             .collect();
         let mut restore = Item::action(style("恢复原版"));
+        restore.detail = "还原已备份的原版文件".to_owned();
         if pending == Some(prepared.len()) {
             restore.label = restore.label.red();
             restore.value = "结束占用进程并恢复".to_owned();
+        } else if store.changed().is_empty() {
+            restore.value = "已是原版".to_owned();
         }
         items.extend([restore, Item::action(style("返回"))]);
         if !screen.select(
@@ -1010,8 +1015,8 @@ pub fn run() -> Result<()> {
             })
             .collect();
         items.extend([
-            Item::action(style("选择文件…")),
-            Item::action(style("重新扫描")),
+            Item::action(style("手动选择")),
+            Item::action(style("刷新列表")),
             Item::action(style("关于")),
             Item::action("退出".red()),
         ]);

@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    Result, browser, coexist, credentials, debug, emoticon,
+    Result, browser, coexist, credentials, emoticon,
     image::{Image, References, Symbols},
     login, notify,
     progress::Progress,
@@ -168,9 +168,8 @@ pub const FEATURES: &[Feature] = &[
     browser::FEATURE,
     notify::FEATURE,
     tray::FEATURE,
-    uia::FEATURE,
-    debug::FEATURE,
     remote::FEATURE,
+    uia::FEATURE,
     updates::FEATURE,
     sound::FEATURE,
     coexist::FEATURE,
