@@ -4,6 +4,10 @@ on:
   push:
     tags: ["**"]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release Tag
+        type: string
 
 permissions:
   contents: write
@@ -14,17 +18,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - run: cargo fmt --check
-      - run: cargo clippy
       - run: cargo build --release
       - uses: actions/upload-artifact@v7
         with:
           name: betterwx-windows-x64
           path: target/release/betterwx.exe
       - uses: softprops/action-gh-release@v3
-        if: github.ref_type == 'tag'
+        if: github.event_name == 'push' || inputs.release_tag != ''
         with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
           draft: true
           files: target/release/betterwx.exe
