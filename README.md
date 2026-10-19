@@ -1,6 +1,4 @@
-# BetterWX
-<img width="400" src="https://github.com/user-attachments/assets/4bdfb590-d913-4543-b54c-347f6b1d14e7" />
-
+# <img width="300" src="logo_word.png" />
 某补丁工具
 
 支持平台：Windows x64<br>
