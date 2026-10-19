@@ -1,14 +1,14 @@
 use std::{collections::BTreeMap, ops::Range};
 
 use iced_x86::{
-    Register,
+    Code, Register,
     code_asm::{CodeAssembler, eax},
 };
 
 use crate::{
     Result,
     feature::{Analysis, Edit, Feature, Mode, Target},
-    image::{Image, References, Symbols, calls, functions, literal},
+    image::{Image, References, Symbols, assembly, calls, functions, literal},
     progress::Progress,
     xlog,
 };
@@ -88,15 +88,34 @@ impl Analysis for Scan {
             .collect::<Vec<_>>()
             .try_into()
             .map_err(|_| "无法唯一定位系统浏览器偏好读取函数")?;
+        let values = image
+            .instructions(&getter)?
+            .into_iter()
+            .filter(|instruction| {
+                instruction.code() == Code::Movzx_r32_rm8
+                    && instruction.op0_register() == Register::EAX
+            })
+            .collect::<Vec<_>>();
+        let [value] = values[..] else {
+            return Err("无法唯一定位系统浏览器偏好返回值".into());
+        };
         let step = progress.activity("准备浏览器补丁");
         let mut code = CodeAssembler::new(64)?;
         code.mov(eax, 1)?;
-        code.ret()?;
-        let edits = image.replace_function(&getter, &mut code, &[1, 0, 0, 0])?;
+        let mut bytes = code.assemble(value.ip())?;
+        if bytes.len() > value.len() {
+            return Err("返回值指令空间不足".into());
+        }
+        bytes.resize(value.len(), 0x90);
+        let offset = image.offset(value.ip())?;
         step.finish(format!(
-            "系统浏览器偏好；RVA 0x{:08X}；返回开启",
-            getter.start - image.base(),
+            "系统浏览器偏好；RVA 0x{:08X}；{} → mov eax,1",
+            value.ip() - image.base(),
+            assembly(image.data(value.ip(), value.len())?, value.ip()),
         ));
-        Ok(vec![Mode::enabled(edits)])
+        Ok(vec![Mode::enabled(vec![Edit {
+            range: offset..offset + value.len(),
+            bytes,
+        }])])
     }
 }
