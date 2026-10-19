@@ -4,8 +4,10 @@ use std::{
 };
 
 use iced_x86::{
-    Code, OpKind, Register,
-    code_asm::{CodeAssembler, byte_ptr, dword_ptr, ptr, qword_ptr, r8d, rax, rbx, rcx, rdx, rsp},
+    Code, Mnemonic, OpKind, Register,
+    code_asm::{
+        CodeAssembler, byte_ptr, dword_ptr, eax, ptr, qword_ptr, r8d, rax, rbx, rcx, rdx, rsp,
+    },
 };
 
 use crate::{
@@ -19,6 +21,7 @@ use crate::{
 
 const CLEAR: &str = "kernel::KernelPrivate::ClearAutoLoginInfo";
 const GET: &str = "kernel::KernelPrivate::GetAutoLoginInfo";
+const REQUEST: &str = "kernel::manager::LoginManager::PushLoginURL";
 const INIT: &str = "mmui::LoginViewModel::Init()::(lambda)::operator()";
 const CANCEL: &str = "mmui::LoginViewModel::OnCancelButtonClick";
 const BACK: &str = "mmui::LoginViewModel::OnBackButtonClick";
@@ -26,7 +29,8 @@ const MENU: &str = "mmui::LoginViewModel::OnMenuLoginButtonClick";
 const AUTO: &str = "OnAutoLoginButtonClick";
 const DELAY: &str = "mmui::LoginViewModel::DelayCheckQrCode";
 const FILE: &str = "login_service.cc";
-const FUNCTIONS: &[&str] = &[CLEAR, GET, INIT, CANCEL, BACK, MENU, AUTO, DELAY];
+const FUNCTIONS: &[&str] = &[CLEAR, GET, REQUEST, INIT, CANCEL, BACK, MENU, AUTO, DELAY];
+const SERVER_BUSY: i32 = -446;
 
 pub const FEATURE: Feature = Feature {
     id: "keep-login",
@@ -136,7 +140,6 @@ fn prepare(
         return Err("无法定位登录信息清理调用".into());
     };
     let root = calls[0].near_branch_target();
-    let clear = calls[2];
     let mut callbacks = BTreeMap::new();
     for instruction in image.instructions(&found[AUTO])? {
         if instruction.code() != Code::Lea_r64_m || !instruction.is_ip_rel_memory_operand() {
@@ -235,21 +238,81 @@ fn prepare(
     let [notify] = targets[..] else {
         return Err("无法定位登录界面刷新".into());
     };
+    let request = image.instructions(&found[REQUEST])?;
+    let comparisons: Vec<_> = request
+        .iter()
+        .enumerate()
+        .filter(|(_, instruction)| {
+            instruction.code() == Code::Cmp_EAX_imm32 && instruction.immediate32() as i32 == -2017
+        })
+        .collect();
+    let [(index, comparison)] = comparisons[..] else {
+        return Err("无法定位登录信息失效判定".into());
+    };
+    let branch = request
+        .get(index + 1)
+        .filter(|instruction| instruction.mnemonic() == Mnemonic::Jne)
+        .ok_or("无法定位登录信息清理分支")?;
+    let result = request[..index]
+        .iter()
+        .rfind(|instruction| {
+            instruction.code() == Code::Mov_r32_rm32
+                && instruction.op0_register() == Register::EAX
+                && instruction.op1_kind() == OpKind::Memory
+                && !instruction.is_ip_rel_memory_operand()
+                && instruction.memory_displacement64() == 4
+        })
+        .ok_or("无法定位登录请求错误码")?;
+    let continuation = request
+        .iter()
+        .find(|instruction| {
+            instruction.ip() > result.ip()
+                && instruction.ip() < comparison.ip()
+                && instruction.mnemonic() == Mnemonic::Je
+                && instruction.near_branch_target() > instruction.ip()
+                && instruction.near_branch_target() <= comparison.ip()
+        })
+        .ok_or("无法定位登录结果判定范围")?
+        .near_branch_target();
     step.finish(format!(
-        "{GET}；RVA 0x{:08X}\n登录响应回调；RVA 0x{:08X}",
+        "{GET}；RVA 0x{:08X}\n登录响应回调；RVA 0x{:08X}\n{REQUEST}；RVA 0x{:08X}",
         found[GET].start - image.base(),
         callback.start - image.base(),
+        found[REQUEST].start - image.base(),
     ));
 
     let step = progress.activity("准备登录信息补丁");
-    let offset = image.offset(clear.ip())?;
+    let mut code = CodeAssembler::new(64)?;
+    code.add_instruction(*result)?;
+    code.cmp(eax, SERVER_BUSY)?;
+    code.je(branch.near_branch_target())?;
+    let mut kind = *result;
+    kind.set_ip(0);
+    kind.set_memory_displacement64(0);
+    code.add_instruction(kind)?;
+    code.jmp(comparison.ip())?;
+    let bytes = code.assemble(result.ip())?;
+    if result.ip() + bytes.len() as u64 > continuation {
+        return Err("登录结果判定的指令空间不足".into());
+    }
+    let offset = image.offset(result.ip())?;
     let mut edits = vec![Edit {
-        range: offset..offset + clear.len(),
-        bytes: vec![0x31, 0xc0, 0x90, 0x90, 0x90],
+        range: offset..offset + bytes.len(),
+        bytes,
     }];
+    let mut comparison = *comparison;
+    comparison.set_immediate32(0);
+    let mut code = CodeAssembler::new(64)?;
+    code.add_instruction(comparison)?;
+    let bytes = code.assemble(comparison.ip())?;
+    let offset = image.offset(comparison.ip())?;
+    edits.push(Edit {
+        range: offset..offset + bytes.len(),
+        bytes,
+    });
     step.record(format!(
-        "RVA 0x{:08X}；call {CLEAR} → xor eax,eax",
-        clear.ip() - image.base(),
+        "RVA 0x{:08X}；读取错误码和错误类型 → 原清理分支",
+        result.ip() - image.base(),
     ));
 
     let mut code = CodeAssembler::new(64)?;
