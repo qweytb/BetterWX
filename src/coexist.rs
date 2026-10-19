@@ -9,8 +9,8 @@ use std::{
 use iced_x86::{
     Code, Decoder, DecoderOptions, Instruction, MemoryOperand, Mnemonic, OpKind, Register,
     code_asm::{
-        CodeAssembler, al, byte_ptr, dl, dword_ptr, eax, ecx, edi, edx, esi, ptr, r8d, r9, r9d,
-        r10, r11, rax, rbp, rcx, rdi, rdx, rsi, rsp, word_ptr,
+        CodeAssembler, al, byte_ptr, dl, dword_ptr, eax, ecx, edi, edx, esi, ptr, qword_ptr, r8d,
+        r9, r9d, r10, r11, rax, rbp, rcx, rdi, rdx, rsi, rsp, word_ptr,
     },
 };
 
@@ -495,65 +495,33 @@ fn initialize(
                 && part[2].mnemonic() == Mnemonic::Nop
                 && part[3].code() == Code::Mov_r32_imm32
                 && part[3].op0_register() == Register::ECX
+                && part[3].immediate32() == 6
                 && matches!(part[4].code(), Code::Mov_r64_rm64 | Code::Mov_rm64_r64)
                 && part[4].op0_register() == Register::RDX
                 && part[4].op1_kind() == OpKind::Register
                 && part[4].op1_register() == Register::RSI
                 && part[5].code() == Code::Call_rel32_64
         })
-        .map(|part| part[2].ip())
+        .map(|part| (part[2].ip(), part[5].near_branch_target()))
         .collect();
-    let [insert] = constructors[..] else {
+    let [(insert, query)] = constructors[..] else {
         return Err("无法定位目录对象的初始化位置".into());
     };
-    let slot = body
-        .iter()
-        .rev()
-        .find(|instruction| {
-            instruction.ip() < insert
-                && instruction.code() == Code::Lea_r64_m
-                && instruction.op0_register() == Register::RSI
-                && instruction.memory_base() == Register::RBP
-                && instruction.memory_index() == Register::None
-        })
-        .ok_or("找不到目录对象的栈位置")?;
-    let frame = body
-        .iter()
-        .find(|instruction| {
-            instruction.code() == Code::Lea_r64_m
-                && instruction.op0_register() == Register::RBP
-                && instruction.memory_base() == Register::RSP
-                && instruction.memory_index() == Register::None
-        })
-        .ok_or("找不到目录初始化的栈帧")?;
-    if (frame.memory_displacement64() as i64 + slot.memory_displacement64() as i64) < 552 {
-        return Err("目录初始化缺少路径缓冲区空间".into());
-    }
     let cleanup = cleanups(&body, failure);
     let drop = destructor(image, &body, &cleanup, references)?;
     let mut code = CodeAssembler::new(64)?;
-    let mut separator = code.create_label();
     let mut done = code.create_label();
-    code.xor(ecx, ecx)?;
-    code.lea(rdx, ptr(rsp + 32))?;
-    code.mov(r8d, 260)?;
-    code.add_instruction(Instruction::with1(
-        Code::Call_rm64,
-        relative(address(imports, "GetModuleFileNameW")?),
-    )?)?;
-    code.test(eax, eax)?;
+    code.mov(ecx, 3)?;
+    code.mov(rdx, rsi)?;
+    code.call(query)?;
+    code.test(al, al)?;
     code.je(failure)?;
-    code.cmp(eax, 260)?;
-    code.jae(failure)?;
-    code.lea(rdx, ptr(rsp + 32))?;
-    code.set_label(&mut separator)?;
-    code.test(eax, eax)?;
-    code.je(done)?;
-    code.dec(eax)?;
-    code.cmp(word_ptr(rdx + rax * 2), 92)?;
-    code.jne(separator)?;
-    code.cmp(eax, 2)?;
+    code.mov(rax, qword_ptr(rsi + 16))?;
+    code.cmp(rax, 2)?;
     code.jb(done)?;
+    code.mov(rdx, rsi)?;
+    code.cmp(qword_ptr(rsi + 24), 8)?;
+    code.cmovae(rdx, qword_ptr(rsi))?;
     code.cmp(word_ptr(rdx + rax * 2 - 4), 92)?;
     code.jne(done)?;
     code.movzx(eax, word_ptr(rdx + rax * 2 - 2))?;
@@ -561,6 +529,7 @@ fn initialize(
     code.lea(ecx, ptr(rax - i32::from(b'A')))?;
     code.cmp(ecx, i32::from(b'Z' - b'A'))?;
     code.ja(done)?;
+    // Logging calls reserve outgoing stack argument slots here.
     code.mov(byte_ptr(rsp + 40), al)?;
     code.add_instruction(Instruction::with2(
         Code::Lea_r64_m,
