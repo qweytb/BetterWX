@@ -13,7 +13,7 @@ const KEY: &str = "accessibility_enable_scheme\0";
 
 pub const FEATURE: Feature = Feature {
     id: "uia",
-    name: "无障碍自动化",
+    name: "无障碍读取控件",
     description: "启用无障碍屏幕阅读器读取控件",
     targets: &[Target {
         file: None,

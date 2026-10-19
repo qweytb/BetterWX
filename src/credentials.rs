@@ -35,7 +35,7 @@ const SERVER_BUSY: i32 = -446;
 pub const FEATURE: Feature = Feature {
     id: "keep-login",
     name: "保留登录信息",
-    description: "登录失败时不要清理登录信息",
+    description: "登录失败时不要清理登录信息，除非登录信息真的失效",
     targets: &[Target {
         file: None,
         find,

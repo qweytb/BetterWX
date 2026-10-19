@@ -45,7 +45,7 @@ const NAMES: &[&str] = &[
 
 pub const FEATURE: Feature = Feature {
     id: "emoticon",
-    name: "表情复制",
+    name: "表情复制为图片",
     description: "预览和复制动画表情",
     targets: &[Target {
         file: None,

@@ -14,7 +14,7 @@ const FILTER: &str = "virtual mmui::WeChatNativeEventFilter::nativeEventFilter";
 
 pub const FEATURE: Feature = Feature {
     id: "remote",
-    name: "模拟输入兼容",
+    name: "兼容模拟输入",
     description: "修正模拟输入导致自动退出登录的问题",
     targets: &[Target {
         file: None,
