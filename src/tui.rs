@@ -594,6 +594,10 @@ fn version(path: &Path) -> String {
         .into_owned()
 }
 
+fn occupied(action: &str) -> String {
+    format!("再按一下可以结束进程以继续{action}")
+}
+
 fn apply(
     store: &mut Store,
     prepared: &[feature::Prepared],
@@ -685,7 +689,7 @@ fn coexist(
                 style("共存支持".to_owned())
             },
             value: if pending {
-                format!("结束占用进程并{}", if enabled { "关闭" } else { "开启" })
+                occupied(if enabled { "关闭" } else { "开启" })
             } else if error.is_some() {
                 "不可用".to_owned()
             } else if enabled {
@@ -861,7 +865,7 @@ fn sounds(
                 style("外置提示音支持".to_owned())
             },
             value: if pending {
-                format!("结束占用进程并{}", if enabled { "关闭" } else { "开启" })
+                occupied(if enabled { "关闭" } else { "开启" })
             } else if error.is_some() {
                 "不可用".to_owned()
             } else if enabled {
@@ -941,7 +945,7 @@ fn icon(
                 style("外置图标支持".to_owned())
             },
             value: if pending {
-                format!("结束占用进程并{}", if enabled { "关闭" } else { "开启" })
+                occupied(if enabled { "关闭" } else { "开启" })
             } else if error.is_some() {
                 "不可用".to_owned()
             } else if enabled {
@@ -1064,7 +1068,7 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                         }
                         Some(_) => "开启".to_owned(),
                     };
-                    format!("结束占用进程并{action}")
+                    occupied(&action)
                 } else {
                     if error.is_some() {
                         "不可用"
@@ -1099,7 +1103,7 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
             let mut update = Item::action(style("更新补丁"));
             if pending == Some(prepared.len() + 1) {
                 update.label = update.label.red();
-                update.value = "结束占用进程并更新".to_owned();
+                update.value = occupied("更新");
             }
             items.insert(0, update);
         }
@@ -1107,7 +1111,7 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
         restore.detail = "还原已备份的原版文件".to_owned();
         if pending == Some(prepared.len()) {
             restore.label = restore.label.red();
-            restore.value = "结束占用进程并恢复".to_owned();
+            restore.value = occupied("恢复");
         } else if store.changed().is_empty() {
             restore.value = if store.files.values().any(|file| file.source_issue.is_some()) {
                 "缺少原版备份"
