@@ -23,6 +23,7 @@ mod tray;
 mod tui;
 mod uia;
 mod updates;
+mod writable;
 mod xlog;
 
 use std::{env, error::Error, path::PathBuf, process::ExitCode};
