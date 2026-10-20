@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    Result, appex, browser, coexist, credentials, emoticon,
+    Result, appex, browser, coexist, credentials, emoticon, icon,
     image::{Image, References, Symbols},
     login, notify,
     progress::Progress,
@@ -172,6 +172,7 @@ pub const FEATURES: &[Feature] = &[
     remote::FEATURE,
     uia::FEATURE,
     updates::FEATURE,
+    icon::FEATURE,
     sound::FEATURE,
     coexist::FEATURE,
 ];
@@ -452,6 +453,9 @@ pub fn change(
     }
     if mode.is_some() && patch.feature.id == sound::FEATURE.id {
         sound::initialize(store, patch, progress)?;
+    }
+    if mode.is_some() && patch.feature.id == icon::FEATURE.id {
+        icon::initialize(store, patch, progress)?;
     }
     if mode.is_some() && patch.feature.id == notify::FEATURE.id {
         notify::initialize(progress)?;

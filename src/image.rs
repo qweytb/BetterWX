@@ -247,12 +247,19 @@ impl<'a> Image<'a> {
         Err(format!("地址 {address:#x} 没有对应的文件位置").into())
     }
 
+    pub fn address(&self, offset: usize) -> Result<u64> {
+        self.file
+            .sections()
+            .find_map(|section| {
+                let (start, size) = section.file_range()?;
+                let offset = (offset as u64).checked_sub(start)?;
+                (offset < size).then_some(section.address() + offset)
+            })
+            .ok_or_else(|| format!("文件位置 {offset:#x} 没有对应的地址").into())
+    }
+
     pub fn difference(&self, range: &Range<usize>, before: &[u8], after: &[u8]) -> Result<String> {
-        let address = self.file.sections().find_map(|section| {
-            let (start, size) = section.file_range()?;
-            let offset = (range.start as u64).checked_sub(start)?;
-            (offset < size).then_some(section.address() + offset)
-        });
+        let address = self.address(range.start).ok();
         let mut start = address;
         let mut values = Vec::new();
         for data in [before, after] {

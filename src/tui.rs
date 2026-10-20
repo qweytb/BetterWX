@@ -606,6 +606,11 @@ fn apply(
     {
         crate::sound::cleanup(store, prepared, progress)?;
     }
+    if change
+        .is_none_or(|(patch, mode)| patch.feature.id == crate::icon::FEATURE.id && mode.is_none())
+    {
+        crate::icon::cleanup(store, prepared, progress)?;
+    }
     Ok(())
 }
 
@@ -865,6 +870,102 @@ fn sounds(
     }
 }
 
+fn icon(
+    screen: &mut Screen,
+    store: &mut Store,
+    prepared: &[feature::Prepared],
+    patch: &feature::Prepared,
+) -> Result<()> {
+    let detail = format!(" -- {}", version(&store.target));
+    let path = crate::icon::path(&store.target)?;
+    let mut selected = 0;
+    let mut pending = false;
+    let mut notice = String::new();
+    loop {
+        let enabled = patch.state(store).enabled();
+        let error = patch.issue(store);
+        let mut items = vec![Item {
+            marker: if enabled { "■" } else { "□" },
+            label: if error.is_some() || pending {
+                "外置图标支持".to_owned().red()
+            } else {
+                style("外置图标支持".to_owned())
+            },
+            value: if pending {
+                format!("结束占用进程并{}", if enabled { "关闭" } else { "开启" })
+            } else if error.is_some() {
+                "不可用".to_owned()
+            } else if enabled {
+                "已启用".to_owned()
+            } else {
+                "未启用".to_owned()
+            },
+            detail: error
+                .cloned()
+                .unwrap_or_else(|| patch.feature.description.to_owned()),
+        }];
+        if enabled {
+            for label in ["更换图标", "恢复默认"] {
+                let mut item = Item::action(style(label));
+                item.detail = format!("{}\n重启微信后生效", store::display(&path));
+                items.push(item);
+            }
+        }
+        items.push(Item::action(style("返回")));
+        if !screen.select(
+            patch.feature.name,
+            &detail,
+            &items,
+            &mut selected,
+            &notice,
+            "方向键 选择\n回车键 确定\nEsc 返回",
+        )? || selected == items.len() - 1
+        {
+            return Ok(());
+        }
+        if selected == 0 {
+            if let Some(error) = patch.issue(store) {
+                notice = error.clone();
+                continue;
+            }
+            (pending, notice) = screen.change(
+                store,
+                prepared,
+                Some((patch, (!enabled).then_some(0))),
+                pending,
+            )?;
+            if screen.exiting {
+                return Ok(());
+            }
+            continue;
+        }
+        pending = false;
+        let file = if selected == 1 {
+            match crate::icon::pick() {
+                Ok(Some(path)) => Some(path),
+                Ok(None) => continue,
+                Err(error) => {
+                    notice = error.to_string();
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        notice = match screen.work(patch.feature.name, &detail, |progress| match selected {
+            1 => crate::icon::import(store, file.as_deref().ok_or("缺少图片文件")?, progress),
+            2 => crate::icon::restore(store, patch, progress),
+            _ => unreachable!(),
+        }) {
+            Ok(_) => String::new(),
+            Err(error) => error.to_string(),
+        };
+        if screen.exiting {
+            return Ok(());
+        }
+    }
+}
+
 fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
     let detail = format!(" -- {}", version(path));
     let Some((mut store, prepared)) = screen.work("分析", &detail, |progress| {
@@ -884,8 +985,12 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
             .iter()
             .enumerate()
             .map(|(index, patch)| {
-                if [crate::coexist::FEATURE.id, crate::sound::FEATURE.id]
-                    .contains(&patch.feature.id)
+                if [
+                    crate::coexist::FEATURE.id,
+                    crate::sound::FEATURE.id,
+                    crate::icon::FEATURE.id,
+                ]
+                .contains(&patch.feature.id)
                 {
                     let mut item = Item::action(style(patch.feature.name));
                     item.detail = patch.feature.description.to_owned();
@@ -954,12 +1059,20 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
             return Ok(());
         };
         let change = if let Some(patch) = prepared.get(selected) {
-            if [crate::coexist::FEATURE.id, crate::sound::FEATURE.id].contains(&patch.feature.id) {
+            if [
+                crate::coexist::FEATURE.id,
+                crate::sound::FEATURE.id,
+                crate::icon::FEATURE.id,
+            ]
+            .contains(&patch.feature.id)
+            {
                 pending = None;
                 let result = if patch.feature.id == crate::coexist::FEATURE.id {
                     coexist(screen, &mut store, &prepared, patch)
-                } else {
+                } else if patch.feature.id == crate::sound::FEATURE.id {
                     sounds(screen, &mut store, &prepared, patch)
+                } else {
+                    icon(screen, &mut store, &prepared, patch)
                 };
                 notice = match result {
                     Ok(()) => String::new(),

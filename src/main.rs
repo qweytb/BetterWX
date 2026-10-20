@@ -4,6 +4,7 @@ mod coexist;
 mod credentials;
 mod emoticon;
 mod feature;
+mod icon;
 mod image;
 mod install;
 mod instance;
@@ -12,6 +13,7 @@ mod notify;
 #[cfg(windows)]
 mod process;
 mod progress;
+mod qrc;
 mod remote;
 mod resources;
 mod revoke;
@@ -41,6 +43,8 @@ BetterWX
   betterwx coexist <create|remove> <字母> [文件]
   betterwx sound import <提示音> <音频文件> [文件]
   betterwx sound restore <提示音> [文件]
+  betterwx icon import <图片文件> [文件]
+  betterwx icon restore [文件]
   betterwx restore [文件]
 
 无参数启动时进入交互界面。
@@ -73,6 +77,7 @@ fn run() -> Result<()> {
     let mut entry = None;
     let mut remove = false;
     let mut audio = None;
+    let mut picture = None;
     let feature = match command {
         "enable" | "disable" => {
             let argument = arguments.next().ok_or("需要指定功能名称")?;
@@ -103,6 +108,17 @@ fn run() -> Result<()> {
             };
             audio = Some((operation, sound, file));
             Some(feature::find(sound::FEATURE.id)?)
+        }
+        "icon" => {
+            let operation = arguments.next().ok_or("需要指定 import 或 restore")?;
+            let operation = operation.to_str().ok_or("操作名称必须为文字")?.to_owned();
+            let file = match operation.as_str() {
+                "import" => Some(PathBuf::from(arguments.next().ok_or("需要指定图片文件")?)),
+                "restore" => None,
+                _ => return Err(format!("未知图标操作：{operation}").into()),
+            };
+            picture = Some((operation, file));
+            Some(feature::find(icon::FEATURE.id)?)
         }
         "status" | "restore" => None,
         _ => return Err(format!("未知命令：{command}").into()),
@@ -174,6 +190,25 @@ fn run() -> Result<()> {
             };
             println!("{}：{message}", sound.name);
         }
+        "icon" => {
+            let (operation, file) = picture.ok_or("缺少图标操作")?;
+            let patch = prepared
+                .iter()
+                .find(|patch| patch.feature.id == icon::FEATURE.id)
+                .ok_or("找不到图标分析结果")?;
+            let message = match operation.as_str() {
+                "import" => {
+                    icon::import(&store, &file.ok_or("缺少图片文件")?, &progress)?;
+                    "已替换"
+                }
+                "restore" => {
+                    icon::restore(&store, patch, &progress)?;
+                    "已恢复"
+                }
+                _ => unreachable!(),
+            };
+            println!("托盘图标：{message}");
+        }
         "enable" | "disable" | "coexist" => {
             let feature = feature.ok_or("缺少功能名称")?;
             let patch = prepared
@@ -229,6 +264,9 @@ fn run() -> Result<()> {
             if feature.id == sound::FEATURE.id && !enable {
                 sound::cleanup(&mut store, &prepared, &progress)?;
             }
+            if feature.id == icon::FEATURE.id && !enable {
+                icon::cleanup(&mut store, &prepared, &progress)?;
+            }
             println!(
                 "{}：{}",
                 feature.name,
@@ -245,6 +283,7 @@ fn run() -> Result<()> {
             let changed = !store.changed().is_empty();
             store.save(store.originals(), &progress)?;
             sound::cleanup(&mut store, &prepared, &progress)?;
+            icon::cleanup(&mut store, &prepared, &progress)?;
             println!(
                 "{}",
                 if changed {
