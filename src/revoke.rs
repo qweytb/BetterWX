@@ -15,7 +15,7 @@ use iced_x86::{
 use crate::{
     Result,
     feature::{Analysis, Edit, Feature, Mode, Target},
-    image::{Image, References, Symbols, functions},
+    image::{Image, References, Symbols, argument, functions},
     progress::{Progress, Step},
     xlog,
 };
@@ -30,6 +30,9 @@ const VIEW: &str = "virtual mmui::ChatMessageViewModel::OnMessageRevoke";
 const GROUP: &str = "[group msg]add groupinfo in revoked group msg:";
 const SUMMARY: &str = "kernel::service::SessionService::CoHandleMessageRevoke";
 const REFRESH: &str = "kernel::service::SessionService::CoHandleRevokedMessageOutOfDate";
+const TIME: &str = "revoketime\0";
+const POSITION: &str = "invalid string position\0";
+const PREFIX: &str = "已阻止";
 const FUNCTIONS: &[&str] = &[
     REVOKE, DELETE, SORT, ADD, UNREAD, SESSION, VIEW, SUMMARY, REFRESH,
 ];
@@ -62,6 +65,14 @@ struct Plan {
     view: u64,
     instructions: Vec<Instruction>,
     view_type: u64,
+    notice: Notice,
+}
+
+struct Notice {
+    range: Range<u64>,
+    tip: Slot,
+    local: i64,
+    prefix: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -177,13 +188,20 @@ fn call_patch(image: &Image<'_>, instruction: &Instruction, target: u64) -> Resu
 }
 
 fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
-    xlog::find(
+    let mut symbols = xlog::find(
         image,
         &[
             REVOKE, DELETE, SORT, ADD, UNREAD, SESSION, VIEW, GROUP, SUMMARY, REFRESH,
         ],
         progress,
-    )
+    )?;
+    for text in [TIME, POSITION] {
+        symbols.insert(
+            text.to_owned(),
+            image.find(text, text.as_bytes(), progress)?,
+        );
+    }
+    Ok(symbols)
 }
 
 fn scan(symbols: Symbols) -> Box<dyn Analysis> {
@@ -243,15 +261,16 @@ impl Analysis for Scan {
         if references.get(plan.cleanup).is_some() {
             return Err("摘要清理函数还有其他调用".into());
         }
+        let mut edits = notice(image, &plan.notice, &self.symbols, references, progress)?;
         let step = progress.activity("准备消息显示");
-        let edits = view(
+        edits.extend(view(
             image,
             &plan.instructions,
             references
                 .get(plan.view_type)
                 .ok_or("找不到消息视图类型的引用")?,
             &step,
-        )?;
+        )?);
         step.finish(format!(
             "{VIEW}；RVA 0x{:08X}；sortSeq 相等 → 比较 localId",
             plan.view - image.base(),
@@ -454,6 +473,8 @@ fn prepare(
     group.set_label(&mut finish)?;
     group.add(rsp, 0x28)?;
     group.ret()?;
+    let prefix = cleanup.start + group.assemble(cleanup.start)?.len() as u64;
+    group.db(PREFIX.as_bytes())?;
     edits.extend(image.replace_function(
         &bridge,
         &mut assembler,
@@ -508,8 +529,271 @@ fn prepare(
             view: found[VIEW].start,
             instructions: shown,
             view_type,
+            notice: Notice {
+                range: root[ordinary].next_ip()..root[add_index].ip(),
+                tip,
+                local,
+                prefix,
+            },
         },
     ))
+}
+
+fn notice(
+    image: &Image<'_>,
+    notice: &Notice,
+    symbols: &Symbols,
+    references: &References,
+    progress: &Progress,
+) -> Result<Vec<Edit>> {
+    let function = image
+        .function(notice.range.start)?
+        .ok_or("找不到撤回提示处理函数")?;
+    let body = image.instructions(&function)?;
+    let serialized = functions(TIME, symbols, references);
+    let serializer = unique(
+        calls(&body)
+            .map(Instruction::near_branch_target)
+            .filter(|target| serialized.contains_key(target))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        "撤回提示序列化函数",
+    )?;
+    let serialization = body
+        .iter()
+        .rposition(|instruction| {
+            instruction.code() == Code::Call_rel32_64
+                && instruction.near_branch_target() == serializer
+        })
+        .ok_or("找不到撤回提示序列化调用")?;
+    let source = argument(&body, serialization, Register::RCX)?;
+    if source.op1_kind() != OpKind::Register {
+        return Err("无法识别撤回提示内容对象".into());
+    }
+    let source = body[..serialization]
+        .iter()
+        .rev()
+        .find(|instruction| {
+            instruction.mnemonic() == Mnemonic::Mov
+                && instruction.op0_register() == source.op1_register()
+        })
+        .ok_or("找不到撤回提示内容对象位置")?;
+    if source.op1_kind() != OpKind::Memory
+        || !matches!(source.memory_base(), Register::RBP | Register::RSP)
+    {
+        return Err("撤回提示内容对象不在原栈帧中".into());
+    }
+    let source = Slot::from(source)?;
+    let output = argument(&body, serialization, Register::RDX)?;
+    if output.mnemonic() != Mnemonic::Lea
+        || !matches!(output.memory_base(), Register::RBP | Register::RSP)
+    {
+        return Err("无法识别撤回提示序列化结果位置".into());
+    }
+    let output = Slot::from(&output)?;
+    let setter = body[serialization + 1..]
+        .iter()
+        .position(|instruction| instruction.code() == Code::Call_rel32_64)
+        .map(|index| serialization + 1 + index)
+        .ok_or("找不到撤回提示内容更新调用")?;
+    let receiver = argument(&body, setter, Register::RCX)?;
+    if receiver.mnemonic() != Mnemonic::Lea || Slot::from(&receiver)? != notice.tip {
+        return Err("撤回提示内容更新对象与预期不同".into());
+    }
+    let setter = body[setter].near_branch_target();
+    let serialized = image.instructions(&serialized[&serializer])?;
+    let field = unique(
+        serialized
+            .windows(3)
+            .filter(|window| {
+                window[0].code() == Code::Lea_r64_m
+                    && window[0].op0_register() == Register::RDX
+                    && window[1].code() == Code::Cmp_rm64_imm8
+                    && window[1].memory_base() == window[0].memory_base()
+                    && window[1].memory_displacement64() == window[0].memory_displacement64() + 24
+                    && window[1].immediate8() == 16
+                    && window[2].mnemonic() == Mnemonic::Jb
+            })
+            .map(|window| window[0].memory_displacement64() as i64)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        "撤回提示文字字段",
+    )?;
+
+    let mut destructors = BTreeSet::new();
+    for target in calls(&body)
+        .map(Instruction::near_branch_target)
+        .collect::<BTreeSet<_>>()
+    {
+        let Some(function) = image.function(target)? else {
+            continue;
+        };
+        let code = image.instructions(&function)?;
+        let Some(owner) = code
+            .iter()
+            .take_while(|instruction| instruction.mnemonic() != Mnemonic::Call)
+            .find(|instruction| {
+                instruction.code() == Code::Mov_r64_rm64
+                    && instruction.op1_kind() == OpKind::Memory
+                    && instruction.memory_base() == Register::RCX
+                    && instruction.memory_displacement64() == 8
+            })
+        else {
+            continue;
+        };
+        let counters: Vec<_> = code
+            .iter()
+            .filter(|instruction| {
+                instruction.code() == Code::Dec_rm32
+                    && instruction.has_lock_prefix()
+                    && instruction.memory_base() == owner.op0_register()
+            })
+            .map(Instruction::memory_displacement64)
+            .collect();
+        if counters == [8, 12] {
+            destructors.insert(target);
+        }
+    }
+    let destroy = unique(destructors.into_iter().collect(), "共享对象析构函数")?;
+    let mut index = body
+        .iter()
+        .position(|instruction| {
+            instruction.ip() >= notice.range.start && instruction.mnemonic() != Mnemonic::Nop
+        })
+        .ok_or("找不到撤回提示前的清理入口")?;
+    let start = body[index].ip();
+    let mut owners = Vec::new();
+    while body[index].ip() < notice.range.end {
+        let Some([load, test, branch]) = body.get(index..index + 3) else {
+            break;
+        };
+        if load.code() != Code::Mov_r64_rm64
+            || load.op1_kind() != OpKind::Memory
+            || !matches!(load.memory_base(), Register::RBP | Register::RSP)
+            || test.mnemonic() != Mnemonic::Test
+            || test.op0_register() != load.op0_register()
+            || test.op1_register() != load.op0_register()
+            || branch.mnemonic() != Mnemonic::Je
+        {
+            break;
+        }
+        let end = body
+            .iter()
+            .position(|instruction| instruction.ip() == branch.near_branch_target())
+            .filter(|end| *end > index)
+            .ok_or("找不到共享对象清理结束位置")?;
+        let counters: Vec<_> = body[index..end]
+            .iter()
+            .filter(|instruction| {
+                instruction.code() == Code::Dec_rm32
+                    && instruction.has_lock_prefix()
+                    && instruction.memory_base() == load.op0_register()
+            })
+            .map(Instruction::memory_displacement64)
+            .collect();
+        if counters != [8, 12] {
+            break;
+        }
+        owners.push((Slot::from(load)?.add(-8), load.op0_register()));
+        index = end;
+        while body[index].mnemonic() == Mnemonic::Nop {
+            index += 1;
+        }
+    }
+    let scratch = register(owners.last().ok_or("找不到撤回提示前的共享对象清理")?.1)?;
+    let range = start..body[index].ip();
+    let states = image.exception_states(function.start)?;
+    if states
+        .iter()
+        .rfind(|state| state.instruction <= range.start)
+        .is_none_or(|state| state.state != -1)
+    {
+        return Err("无法识别提示清理时的异常状态".into());
+    }
+    let state = unique(
+        states
+            .iter()
+            .filter(|state| state.instruction > range.start && state.instruction <= range.end)
+            .collect(),
+        "提示清理后的异常状态",
+    )?;
+    if state.state < 0 {
+        return Err("提示文字处理缺少原生异常清理状态".into());
+    }
+    let replacement = replace(image, symbols, references)?;
+    let step = progress.activity("准备撤回提示文案");
+    let mut code = CodeAssembler::new(64)?;
+    for (owner, _) in owners {
+        code.lea(rcx, owner.memory()?)?;
+        code.call(destroy)?;
+    }
+    let resumed = range.start + code.assemble(range.start)?.len() as u64;
+    code.cmp(dword_ptr(notice.tip.add(notice.local).memory()?), 0)?;
+    code.jne(range.end)?;
+    code.mov(scratch, qword_ptr(source.memory()?))?;
+    code.lea(rcx, ptr(scratch + field))?;
+    code.xor(edx, edx)?;
+    code.xor(r8d, r8d)?;
+    code.lea(r9, ptr(Register::RIP) + notice.prefix)?;
+    code.mov(qword_ptr(rsp + 0x20), PREFIX.len() as i32)?;
+    code.call(replacement)?;
+    code.mov(rcx, scratch)?;
+    code.lea(rdx, output.memory()?)?;
+    code.call(serializer)?;
+    code.lea(rcx, notice.tip.memory()?)?;
+    code.lea(rdx, output.memory()?)?;
+    code.call(setter)?;
+    let size = code.assemble(range.start)?.len();
+    let edit = patch(image, range.clone(), &mut code)?;
+    let address = u32::try_from(resumed - image.base())?;
+    step.finish(format!(
+        "RVA 0x{:08X}；{size}/{} 字节；{PREFIX}",
+        range.start - image.base(),
+        range.end - range.start,
+    ));
+    Ok(vec![
+        edit,
+        Edit {
+            range: state.offset..state.offset + 4,
+            bytes: address.to_le_bytes().to_vec(),
+        },
+    ])
+}
+
+fn replace(image: &Image<'_>, symbols: &Symbols, references: &References) -> Result<u64> {
+    let mut found = BTreeSet::new();
+    for error in functions(POSITION, symbols, references).values() {
+        for function in references.get(error.start).into_iter().flatten() {
+            let body = image.instructions(function)?;
+            if body.windows(7).any(|window| {
+                let register = window[0].op0_register();
+                window[0].mnemonic() == Mnemonic::Mov
+                    && window[0].op0_kind() == OpKind::Register
+                    && window[0].op1_kind() == OpKind::Register
+                    && window[0].op1_register() == Register::R8
+                    && window[1].code() == Code::Mov_r64_rm64
+                    && window[1].op0_register() == Register::R8
+                    && window[1].op1_kind() == OpKind::Memory
+                    && matches!(window[1].memory_base(), Register::RSP | Register::RBP)
+                    && window[2].mnemonic() == Mnemonic::Cmp
+                    && window[2].op1_register() == register
+                    && window[3].mnemonic() == Mnemonic::Cmovb
+                    && window[3].op0_register() == register
+                    && window[4].mnemonic() == Mnemonic::Cmp
+                    && window[4].op0_register() == Register::R8
+                    && window[4].op1_register() == register
+                    && window[5].mnemonic() == Mnemonic::Jne
+                    && window[6].code() == Code::Cmp_rm64_imm8
+                    && window[6].memory_displacement64() == 24
+                    && window[6].immediate8() == 16
+            }) {
+                found.insert(function.start);
+            }
+        }
+    }
+    unique(found.into_iter().collect(), "原生字符串替换函数")
 }
 
 fn message_check(image: &Image<'_>, instructions: &[Instruction]) -> Result<u64> {
