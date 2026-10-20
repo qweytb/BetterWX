@@ -52,7 +52,8 @@ BetterWX
 文件可选 Weixin.exe 或 Weixin.dll。
 省略路径时，读取微信安装目录中的最新版本。
 系统通知头像模式：square 方形、circle 圆形。
-restore：还原已备份的原版文件。";
+restore：还原已备份的原版文件。
+--force：确认以当前文件作为备份和补丁基准。";
 
 fn run() -> Result<()> {
     let mut arguments = env::args_os().skip(1).peekable();
@@ -75,6 +76,19 @@ fn run() -> Result<()> {
         return Ok(());
     }
     let command = command.to_str().ok_or("命令必须为文字")?;
+    let mut force = false;
+    let mut arguments = arguments
+        .filter(|argument| {
+            if argument == "--force" {
+                force = true;
+                false
+            } else {
+                true
+            }
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .peekable();
     let mut entry = None;
     let mut remove = false;
     let mut audio = None;
@@ -158,8 +172,20 @@ fn run() -> Result<()> {
         store.load_backups(&feature::targets(&store.target)?, &progress)?;
     }
     println!("目标：{}", store::display(&store.target));
+    if force {
+        for file in store.files.values_mut() {
+            file.confirmed = true;
+        }
+    }
     match command {
         "status" => {
+            for issue in store
+                .files
+                .values()
+                .filter_map(|file| file.source_issue.as_ref())
+            {
+                println!("{issue}");
+            }
             for patch in &prepared {
                 println!(
                     "{}：{}",
@@ -282,7 +308,7 @@ fn run() -> Result<()> {
         }
         "restore" => {
             let changed = !store.changed().is_empty();
-            store.save(store.originals(), &progress)?;
+            store.save(store.originals()?, &progress)?;
             sound::cleanup(&mut store, &prepared, &progress)?;
             icon::cleanup(&mut store, &prepared, &progress)?;
             println!(

@@ -22,6 +22,8 @@ pub struct File {
     pub original: Arc<Vec<u8>>,
     pub enabled: BTreeMap<String, usize>,
     pub issue: Option<String>,
+    pub source_issue: Option<String>,
+    pub confirmed: bool,
 }
 
 pub struct Content {
@@ -79,6 +81,63 @@ pub fn write(path: &Path, data: &[u8], progress: &Progress) -> Result<()> {
     temporary.persist(path)?;
     step.finish(format!("{name}；{} 字节", data.len()));
     Ok(())
+}
+
+#[cfg(windows)]
+fn signature(path: &Path) -> Result<()> {
+    use std::{os::windows::ffi::OsStrExt, ptr::from_mut};
+
+    use windows::core::{Error, HRESULT};
+    use windows_sys::Win32::{
+        Foundation::{INVALID_HANDLE_VALUE, TRUST_E_BAD_DIGEST, TRUST_E_NOSIGNATURE},
+        Security::WinTrust::{
+            WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO,
+            WTD_CHOICE_FILE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
+            WinVerifyTrust,
+        },
+    };
+
+    let path: Vec<_> = path.as_os_str().encode_wide().chain([0]).collect();
+    let mut file = WINTRUST_FILE_INFO {
+        cbStruct: size_of::<WINTRUST_FILE_INFO>() as u32,
+        pcwszFilePath: path.as_ptr(),
+        ..Default::default()
+    };
+    let mut data = WINTRUST_DATA {
+        cbStruct: size_of::<WINTRUST_DATA>() as u32,
+        dwUIChoice: WTD_UI_NONE,
+        dwUnionChoice: WTD_CHOICE_FILE,
+        Anonymous: WINTRUST_DATA_0 { pFile: &mut file },
+        dwStateAction: WTD_STATEACTION_VERIFY,
+        ..Default::default()
+    };
+    let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    let status = unsafe {
+        WinVerifyTrust(
+            INVALID_HANDLE_VALUE,
+            &mut action,
+            from_mut(&mut data).cast(),
+        )
+    };
+    data.dwStateAction = WTD_STATEACTION_CLOSE;
+    unsafe {
+        WinVerifyTrust(
+            INVALID_HANDLE_VALUE,
+            &mut action,
+            from_mut(&mut data).cast(),
+        );
+    }
+    match status {
+        0 => Ok(()),
+        TRUST_E_BAD_DIGEST => Err("文件内容与数字签名不符".into()),
+        TRUST_E_NOSIGNATURE => Err("文件没有数字签名".into()),
+        _ => Err(format!("数字签名验证失败：{}", Error::from_hresult(HRESULT(status)),).into()),
+    }
+}
+
+#[cfg(not(windows))]
+fn signature(_path: &Path) -> Result<()> {
+    Err("验证文件签名需要 Windows".into())
 }
 
 impl Store {
@@ -143,8 +202,17 @@ impl Store {
             .collect()
     }
 
-    pub fn originals(&self) -> BTreeMap<PathBuf, Content> {
-        self.changed()
+    pub fn originals(&self) -> Result<BTreeMap<PathBuf, Content>> {
+        let changed = self.changed();
+        if changed.is_empty()
+            && let Some(issue) = self
+                .files
+                .values()
+                .find_map(|file| file.source_issue.as_ref())
+        {
+            return Err(issue.clone().into());
+        }
+        Ok(changed
             .into_iter()
             .map(|target| {
                 let data = self.files[&target].original.as_ref().clone();
@@ -156,7 +224,7 @@ impl Store {
                     },
                 )
             })
-            .collect()
+            .collect())
     }
 
     pub fn save(
@@ -164,6 +232,15 @@ impl Store {
         contents: BTreeMap<PathBuf, Content>,
         progress: &Progress,
     ) -> Result<()> {
+        for (target, content) in &contents {
+            let file = &self.files[target];
+            if file.current.as_slice() != content.data
+                && !file.confirmed
+                && let Some(issue) = &file.source_issue
+            {
+                return Err(issue.clone().into());
+            }
+        }
         for (target, content) in contents {
             progress.check()?;
             self.files
@@ -178,9 +255,16 @@ impl Store {
 impl File {
     fn open(target: &Path, backup: PathBuf, progress: &Progress) -> Result<Self> {
         let current = Arc::new(read(target, progress, "载入文件")?);
+        let mut source_issue = None;
         let original = if backup.try_exists()? {
             Arc::new(read(&backup, progress, "载入文件")?)
         } else {
+            let step = progress.activity("检查基准文件");
+            step.detail(display(target));
+            source_issue = signature(target)
+                .err()
+                .map(|error| format!("{} 缺少原版备份，{error}", display(target)));
+            step.finish(source_issue.as_deref().unwrap_or("签名有效"));
             current.clone()
         };
         Ok(Self {
@@ -190,6 +274,8 @@ impl File {
             original,
             enabled: BTreeMap::new(),
             issue: None,
+            source_issue,
+            confirmed: false,
         })
     }
 
@@ -209,6 +295,7 @@ impl File {
         self.current = Arc::new(content.data);
         self.enabled = content.enabled;
         self.issue = None;
+        self.source_issue = None;
         Ok(())
     }
 }

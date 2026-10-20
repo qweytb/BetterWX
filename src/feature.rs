@@ -452,6 +452,15 @@ pub fn change(
     if let Some(issue) = patch.issue(store) {
         return Err(issue.clone().into());
     }
+    let targets = patch.targets(store, mode)?;
+    for target in &targets {
+        let file = &store.files[target];
+        if !file.confirmed
+            && let Some(issue) = &file.source_issue
+        {
+            return Err(format!("{issue}\n使用 --force 可继续使用当前文件").into());
+        }
+    }
     if mode.is_some() && patch.feature.id == sound::FEATURE.id {
         sound::initialize(store, patch, progress)?;
     }
@@ -462,7 +471,7 @@ pub fn change(
         notify::initialize(progress)?;
     }
     let mut contents = BTreeMap::new();
-    for target in patch.targets(store, mode)? {
+    for target in targets {
         let file = &store.files[&target];
         let mut enabled = file.enabled.clone();
         if let Some(mode) = mode {

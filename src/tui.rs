@@ -350,6 +350,33 @@ impl Screen {
             Some((patch, mode)) => patch.targets(store, mode)?,
             None => store.changed(),
         };
+        for target in &targets {
+            let file = store.files.get_mut(target).ok_or("找不到目标文件")?;
+            if file.confirmed || file.source_issue.is_none() {
+                continue;
+            }
+            let items = [
+                Item::action(style("无视风险继续操作")),
+                Item::action(style("返回")),
+            ];
+            let notice = format!(
+                "{} 似乎被修改过。\n\n如果以当前文件为基准进行修补，可能导致部分功能异常，推荐重新安装再来修补。",
+                store::display(target),
+            );
+            let mut selected = 0;
+            if !self.select(
+                "基准存在改动",
+                "",
+                &items,
+                &mut selected,
+                &notice,
+                "方向键 选择\n回车键 确定\nEsc 返回",
+            )? || selected == 1
+            {
+                return Ok((false, String::new()));
+            }
+            file.confirmed = true;
+        }
         let error = store.write_error(&targets);
         let terminate = error.is_some() && pending;
         if let Some(error) = error
@@ -594,7 +621,7 @@ fn apply(
             contents
         }
         None => {
-            let contents = store.originals();
+            let contents = store.originals()?;
             step.finish("恢复原始内容");
             contents
         }
@@ -978,7 +1005,12 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
         return Ok(());
     };
     let mut selected = 0;
-    let mut notice = String::new();
+    let mut notice = store
+        .files
+        .values()
+        .filter_map(|file| file.source_issue.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut pending = None;
     loop {
         let mut items: Vec<Item> = prepared
@@ -1045,7 +1077,12 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
             restore.label = restore.label.red();
             restore.value = "结束占用进程并恢复".to_owned();
         } else if store.changed().is_empty() {
-            restore.value = "已是原版".to_owned();
+            restore.value = if store.files.values().any(|file| file.source_issue.is_some()) {
+                "缺少原版备份"
+            } else {
+                "已是原版"
+            }
+            .to_owned();
         }
         items.extend([restore, Item::action(style("返回"))]);
         if !screen.select(
