@@ -1,6 +1,7 @@
 use std::{
+    collections::BTreeMap,
     io::{IsTerminal, Stdout, Write, stdout},
-    path::Path,
+    path::{Path, PathBuf},
     sync::mpsc::{self, RecvTimeoutError},
     thread,
     time::{Duration, Instant},
@@ -21,10 +22,26 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::{
     Result, feature, install,
     progress::{FRAME, Progress, Step},
-    store::{self, Store},
+    store::{self, Content, Store},
 };
 
 type Line = StyledContent<String>;
+
+enum Change<'a> {
+    Feature(&'a feature::Prepared, Option<usize>),
+    Update(BTreeMap<PathBuf, Content>),
+    Restore,
+}
+
+impl Change<'_> {
+    fn targets(&self, store: &Store) -> Result<Vec<PathBuf>> {
+        match self {
+            Self::Feature(patch, mode) => patch.targets(store, *mode),
+            Self::Update(contents) => Ok(contents.keys().cloned().collect()),
+            Self::Restore => Ok(store.changed()),
+        }
+    }
+}
 
 struct Item {
     marker: &'static str,
@@ -339,18 +356,8 @@ impl Screen {
         })
     }
 
-    fn change(
-        &mut self,
-        store: &mut Store,
-        prepared: &[feature::Prepared],
-        change: Option<(&feature::Prepared, Option<usize>)>,
-        pending: bool,
-    ) -> Result<(bool, String)> {
-        let targets = match change {
-            Some((patch, mode)) => patch.targets(store, mode)?,
-            None => store.changed(),
-        };
-        for target in &targets {
+    fn sources(&mut self, store: &mut Store, targets: &[PathBuf]) -> Result<bool> {
+        for target in targets {
             let file = store.files.get_mut(target).ok_or("找不到目标文件")?;
             if file.confirmed || file.source_issue.is_none() {
                 continue;
@@ -373,9 +380,23 @@ impl Screen {
                 "方向键 选择\n回车键 确定\nEsc 返回",
             )? || selected == 1
             {
-                return Ok((false, String::new()));
+                return Ok(false);
             }
             file.confirmed = true;
+        }
+        Ok(true)
+    }
+
+    fn change(
+        &mut self,
+        store: &mut Store,
+        prepared: &[feature::Prepared],
+        change: Change<'_>,
+        pending: bool,
+    ) -> Result<(bool, String)> {
+        let targets = change.targets(store)?;
+        if !self.sources(store, &targets)? {
+            return Ok((false, String::new()));
         }
         let error = store.write_error(&targets);
         let terminate = error.is_some() && pending;
@@ -576,14 +597,11 @@ fn version(path: &Path) -> String {
 fn apply(
     store: &mut Store,
     prepared: &[feature::Prepared],
-    change: Option<(&feature::Prepared, Option<usize>)>,
+    change: Change<'_>,
     terminate: bool,
     progress: &Progress,
 ) -> Result<()> {
-    let targets = match change {
-        Some((patch, mode)) => patch.targets(store, mode)?,
-        None => store.changed(),
-    };
+    let targets = change.targets(store)?;
     #[cfg(not(windows))]
     let _ = terminate;
     #[cfg(windows)]
@@ -609,10 +627,13 @@ fn apply(
             process.terminate(progress)?;
         }
     }
+    if let Change::Update(contents) = change {
+        return feature::update(store, contents, prepared, progress);
+    }
     let step = progress.activity("准备文件内容");
-    let contents = match change {
-        Some((patch, mode)) => {
-            let contents = feature::change(store, patch, mode, prepared, progress)?;
+    let contents = match &change {
+        Change::Feature(patch, mode) => {
+            let contents = feature::change(store, patch, *mode, prepared, progress)?;
             step.finish(format!(
                 "{}；{}",
                 patch.feature.name,
@@ -620,21 +641,22 @@ fn apply(
             ));
             contents
         }
-        None => {
+        Change::Restore => {
             let contents = store.originals()?;
             step.finish("恢复原始内容");
             contents
         }
+        Change::Update(_) => unreachable!(),
     };
     feature::describe(store, &contents, prepared, progress)?;
     store.save(contents, progress)?;
-    if change
-        .is_none_or(|(patch, mode)| patch.feature.id == crate::sound::FEATURE.id && mode.is_none())
+    if matches!(&change, Change::Restore)
+        || matches!(&change, Change::Feature(patch, None) if patch.feature.id == crate::sound::FEATURE.id)
     {
         crate::sound::cleanup(store, prepared, progress)?;
     }
-    if change
-        .is_none_or(|(patch, mode)| patch.feature.id == crate::icon::FEATURE.id && mode.is_none())
+    if matches!(&change, Change::Restore)
+        || matches!(&change, Change::Feature(patch, None) if patch.feature.id == crate::icon::FEATURE.id)
     {
         crate::icon::cleanup(store, prepared, progress)?;
     }
@@ -721,7 +743,7 @@ fn coexist(
             (pending, notice) = screen.change(
                 store,
                 prepared,
-                Some((patch, (!enabled).then_some(0))),
+                Change::Feature(patch, (!enabled).then_some(0)),
                 pending,
             )?;
             if screen.exiting {
@@ -888,7 +910,7 @@ fn sounds(
         (pending, notice) = screen.change(
             store,
             prepared,
-            Some((patch, (!enabled).then_some(0))),
+            Change::Feature(patch, (!enabled).then_some(0)),
             pending,
         )?;
         if screen.exiting {
@@ -958,7 +980,7 @@ fn icon(
             (pending, notice) = screen.change(
                 store,
                 prepared,
-                Some((patch, (!enabled).then_some(0))),
+                Change::Feature(patch, (!enabled).then_some(0)),
                 pending,
             )?;
             if screen.exiting {
@@ -1013,6 +1035,8 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
         .join("\n");
     let mut pending = None;
     loop {
+        let outdated = store.files.values().any(|file| file.issue.is_some());
+        let offset = usize::from(outdated);
         let mut items: Vec<Item> = prepared
             .iter()
             .enumerate()
@@ -1071,6 +1095,14 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                 }
             })
             .collect();
+        if outdated {
+            let mut update = Item::action(style("更新补丁"));
+            if pending == Some(prepared.len() + 1) {
+                update.label = update.label.red();
+                update.value = "结束占用进程并更新".to_owned();
+            }
+            items.insert(0, update);
+        }
         let mut restore = Item::action(style("恢复原版"));
         restore.detail = "还原已备份的原版文件".to_owned();
         if pending == Some(prepared.len()) {
@@ -1095,7 +1127,30 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
         )? {
             return Ok(());
         };
-        let change = if let Some(patch) = prepared.get(selected) {
+        let index = if outdated && selected == 0 {
+            prepared.len() + 1
+        } else {
+            selected - offset
+        };
+        let change = if outdated && selected == 0 {
+            let targets: Vec<_> = store.files.keys().cloned().collect();
+            if !screen.sources(&mut store, &targets)? {
+                if screen.exiting {
+                    return Ok(());
+                }
+                continue;
+            }
+            match screen.work("准备更新", &detail, |progress| {
+                feature::rebuild(&store, &prepared, progress)
+            }) {
+                Ok(Some(contents)) => Change::Update(contents),
+                Ok(None) => return Ok(()),
+                Err(error) => {
+                    notice = error.to_string();
+                    continue;
+                }
+            }
+        } else if let Some(patch) = prepared.get(index) {
             if [
                 crate::coexist::FEATURE.id,
                 crate::sound::FEATURE.id,
@@ -1124,16 +1179,19 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                 notice = error.clone();
                 continue;
             }
-            Some((patch, patch.next(&store)))
-        } else if selected == prepared.len() {
-            None
+            Change::Feature(patch, patch.next(&store))
+        } else if index == prepared.len() {
+            Change::Restore
         } else {
             return Ok(());
         };
         let (retry, message) =
-            screen.change(&mut store, &prepared, change, pending == Some(selected))?;
-        pending = retry.then_some(selected);
+            screen.change(&mut store, &prepared, change, pending == Some(index))?;
+        pending = retry.then_some(index);
         notice = message;
+        if outdated && store.files.values().all(|file| file.issue.is_none()) {
+            selected = selected.saturating_sub(1);
+        }
         if screen.exiting {
             return Ok(());
         }

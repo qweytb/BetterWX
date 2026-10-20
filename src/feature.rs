@@ -355,6 +355,49 @@ pub fn analyze(
     Ok(prepared)
 }
 
+fn recognize<'a>(
+    original: &[u8],
+    current: &[u8],
+    modes: impl Iterator<Item = (usize, &'a [Edit])>,
+) -> Option<usize> {
+    let mut touched = false;
+    let mut matches = Vec::new();
+    for (mode, edits) in modes {
+        let mut matched = 0;
+        let mut applied = !edits.is_empty();
+        for edit in edits {
+            let before = original.get(edit.range.clone());
+            let after = current.get(edit.range.start..edit.range.start + edit.bytes.len());
+            let equal = after == Some(edit.bytes.as_slice());
+            applied &= equal;
+            touched |= current
+                .get(edit.range.clone())
+                .zip(before)
+                .is_some_and(|(current, original)| current != original);
+            if equal && before != Some(edit.bytes.as_slice()) {
+                matched += 1;
+            }
+        }
+        if applied {
+            return Some(mode);
+        }
+        matches.push((mode, matched));
+    }
+    if !touched {
+        return None;
+    }
+    let best = matches.iter().map(|(_, count)| *count).max();
+    let candidates: Vec<_> = matches
+        .iter()
+        .filter(|(_, count)| Some(*count) == best)
+        .map(|(mode, _)| *mode)
+        .collect();
+    Some(match candidates.as_slice() {
+        [mode] => *mode,
+        _ => 0,
+    })
+}
+
 pub fn inspect(store: &mut Store, prepared: &[Prepared], progress: &Progress) -> Result<()> {
     for (target, file) in &mut store.files {
         let name = target.file_name().unwrap_or_default().to_string_lossy();
@@ -366,20 +409,14 @@ pub fn inspect(store: &mut Store, prepared: &[Prepared], progress: &Progress) ->
             let Ok(modes) = &patch.edits else {
                 continue;
             };
-            for (mode, choice) in modes.iter().enumerate() {
-                let Some(edits) = choice.edits.get(target) else {
-                    continue;
-                };
-                let applied = !edits.is_empty()
-                    && edits.iter().all(|edit| {
-                        file.current
-                            .get(edit.range.start..edit.range.start + edit.bytes.len())
-                            == Some(edit.bytes.as_slice())
-                    });
-                if applied {
-                    enabled.insert(patch.feature.id.to_owned(), mode);
-                    break;
-                }
+            let choices = modes.iter().enumerate().filter_map(|(mode, choice)| {
+                choice
+                    .edits
+                    .get(target)
+                    .map(|edits| (mode, edits.as_slice()))
+            });
+            if let Some(mode) = recognize(&file.original, &file.current, choices) {
+                enabled.insert(patch.feature.id.to_owned(), mode);
             }
         }
         let expected = generate(&file.original, &enabled, prepared, target)?;
@@ -453,22 +490,9 @@ pub fn change(
         return Err(issue.clone().into());
     }
     let targets = patch.targets(store, mode)?;
-    for target in &targets {
-        let file = &store.files[target];
-        if !file.confirmed
-            && let Some(issue) = &file.source_issue
-        {
-            return Err(format!("{issue}\n使用 --force 可继续使用当前文件").into());
-        }
-    }
-    if mode.is_some() && patch.feature.id == sound::FEATURE.id {
-        sound::initialize(store, patch, progress)?;
-    }
-    if mode.is_some() && patch.feature.id == icon::FEATURE.id {
-        icon::initialize(store, patch, progress)?;
-    }
-    if mode.is_some() && patch.feature.id == notify::FEATURE.id {
-        notify::initialize(progress)?;
+    sources(store, targets.iter())?;
+    if mode.is_some() {
+        initialize(store, patch, progress)?;
     }
     let mut contents = BTreeMap::new();
     for target in targets {
@@ -483,6 +507,87 @@ pub fn change(
         contents.insert(target, Content { data, enabled });
     }
     Ok(contents)
+}
+
+fn sources<'a>(store: &Store, targets: impl Iterator<Item = &'a PathBuf>) -> Result<()> {
+    for target in targets {
+        let file = &store.files[target];
+        if !file.confirmed
+            && let Some(issue) = &file.source_issue
+        {
+            return Err(format!("{issue}\n使用 --force 可继续使用当前文件").into());
+        }
+    }
+    Ok(())
+}
+
+fn initialize(store: &Store, patch: &Prepared, progress: &Progress) -> Result<()> {
+    match patch.feature.id {
+        id if id == sound::FEATURE.id => sound::initialize(store, patch, progress),
+        id if id == icon::FEATURE.id => icon::initialize(store, patch, progress),
+        id if id == notify::FEATURE.id => notify::initialize(progress),
+        _ => Ok(()),
+    }
+}
+
+pub fn rebuild(
+    store: &Store,
+    prepared: &[Prepared],
+    progress: &Progress,
+) -> Result<BTreeMap<PathBuf, Content>> {
+    sources(store, store.files.keys())?;
+    let mut enabled = Vec::new();
+    for patch in prepared {
+        let mode = match patch.state(store) {
+            State::Disabled => continue,
+            State::Enabled(mode) => mode,
+            State::Partial => 0,
+        };
+        enabled.push((patch, mode));
+    }
+    let mut contents = BTreeMap::new();
+    for (target, file) in &store.files {
+        progress.check()?;
+        let selected = enabled
+            .iter()
+            .filter(|(patch, mode)| {
+                patch.edits.as_ref().expect("mode not prepared")[*mode]
+                    .edits
+                    .contains_key(target)
+            })
+            .map(|(patch, mode)| (patch.feature.id.to_owned(), *mode))
+            .collect();
+        let data = generate(&file.original, &selected, prepared, target)?;
+        if file.current.as_slice() != data {
+            contents.insert(
+                target.clone(),
+                Content {
+                    data,
+                    enabled: selected,
+                },
+            );
+        }
+    }
+    Ok(contents)
+}
+
+pub fn update(
+    store: &mut Store,
+    contents: BTreeMap<PathBuf, Content>,
+    prepared: &[Prepared],
+    progress: &Progress,
+) -> Result<()> {
+    sources(store, contents.keys())?;
+    for patch in prepared {
+        if contents
+            .values()
+            .any(|content| content.enabled.contains_key(patch.feature.id))
+        {
+            initialize(store, patch, progress)?;
+        }
+    }
+    describe(store, &contents, prepared, progress)?;
+    store.save(contents, progress)
 }
 
 pub fn describe(
@@ -500,15 +605,17 @@ pub fn describe(
             };
             let previous = file.enabled.get(patch.feature.id).copied();
             let current = content.enabled.get(patch.feature.id).copied();
-            if previous == current {
-                continue;
-            }
             let Some(mode) = current.or(previous) else {
                 continue;
             };
             let Some(edits) = modes[mode].edits.get(target) else {
                 continue;
             };
+            if edits.iter().all(|edit| {
+                file.current.get(edit.range.clone()) == content.data.get(edit.range.clone())
+            }) {
+                continue;
+            }
             let image = Image::parse(&file.original)?;
             let step = progress.group(patch.feature.name).activity("生成文件内容");
             let mut size = 0;

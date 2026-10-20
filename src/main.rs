@@ -39,6 +39,7 @@ BetterWX
 用法：
   betterwx
   betterwx status [文件]
+  betterwx update [文件]
   betterwx enable <功能> [--mode <模式>] [文件]
   betterwx disable <功能> [文件]
   betterwx coexist <create|remove> <字母> [文件]
@@ -135,7 +136,7 @@ fn run() -> Result<()> {
             picture = Some((operation, file));
             Some(feature::find(icon::FEATURE.id)?)
         }
-        "status" | "restore" => None,
+        "status" | "update" | "restore" => None,
         _ => return Err(format!("未知命令：{command}").into()),
     };
     let mode = if command == "enable" && arguments.peek().is_some_and(|value| value == "--mode") {
@@ -303,6 +304,19 @@ fn run() -> Result<()> {
                     "已启用"
                 } else {
                     patch.label(requested)
+                }
+            );
+        }
+        "update" => {
+            let contents = feature::rebuild(&store, &prepared, &progress)?;
+            let changed = !contents.is_empty();
+            feature::update(&mut store, contents, &prepared, &progress)?;
+            println!(
+                "{}",
+                if changed {
+                    "已更新补丁"
+                } else {
+                    "无需更新补丁"
                 }
             );
         }
