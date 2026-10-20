@@ -5,9 +5,7 @@ use std::{
 
 use iced_x86::{
     Code, Mnemonic, OpKind, Register,
-    code_asm::{
-        CodeAssembler, byte_ptr, dword_ptr, eax, ptr, qword_ptr, r8d, rax, rbx, rcx, rdx, rsp,
-    },
+    code_asm::{CodeAssembler, byte_ptr, dword_ptr, ptr, qword_ptr, r8d, rax, rbx, rcx, rdx, rsp},
 };
 
 use crate::{
@@ -243,7 +241,10 @@ fn prepare(
         .iter()
         .enumerate()
         .filter(|(_, instruction)| {
-            instruction.code() == Code::Cmp_EAX_imm32 && instruction.immediate32() as i32 == -2017
+            matches!(
+                instruction.code(),
+                Code::Cmp_EAX_imm32 | Code::Cmp_rm32_imm32
+            ) && instruction.immediate32() as i32 == -2017
         })
         .collect();
     let [(index, comparison)] = comparisons[..] else {
@@ -253,24 +254,26 @@ fn prepare(
         .get(index + 1)
         .filter(|instruction| instruction.mnemonic() == Mnemonic::Jne)
         .ok_or("无法定位登录信息清理分支")?;
-    let result = request[..index]
-        .iter()
-        .rfind(|instruction| {
-            instruction.code() == Code::Mov_r32_rm32
-                && instruction.op0_register() == Register::EAX
-                && instruction.op1_kind() == OpKind::Memory
-                && !instruction.is_ip_rel_memory_operand()
-                && instruction.memory_displacement64() == 4
-        })
-        .ok_or("无法定位登录请求错误码")?;
+    let result = if comparison.op0_kind() == OpKind::Memory {
+        comparison
+    } else {
+        request[..index]
+            .iter()
+            .rfind(|instruction| {
+                instruction.code() == Code::Mov_r32_rm32
+                    && instruction.op0_register() == comparison.op0_register()
+                    && instruction.op1_kind() == OpKind::Memory
+                    && !instruction.is_ip_rel_memory_operand()
+                    && instruction.memory_displacement64() == 4
+            })
+            .ok_or("无法定位登录请求错误码")?
+    };
     let continuation = request
         .iter()
         .find(|instruction| {
             instruction.ip() > result.ip()
-                && instruction.ip() < comparison.ip()
                 && instruction.mnemonic() == Mnemonic::Je
                 && instruction.near_branch_target() > instruction.ip()
-                && instruction.near_branch_target() <= comparison.ip()
         })
         .ok_or("无法定位登录结果判定范围")?
         .near_branch_target();
@@ -283,14 +286,25 @@ fn prepare(
 
     let step = progress.activity("准备登录信息补丁");
     let mut code = CodeAssembler::new(64)?;
-    code.add_instruction(*result)?;
-    code.cmp(eax, SERVER_BUSY)?;
+    let mut value = *result;
+    value.set_ip(0);
+    value.set_code(Code::Cmp_rm32_imm32);
+    value.set_op0_kind(OpKind::Memory);
+    value.set_op1_kind(OpKind::Immediate32);
+    value.set_immediate32(SERVER_BUSY as u32);
+    code.add_instruction(value)?;
     code.je(branch.near_branch_target())?;
-    let mut kind = *result;
-    kind.set_ip(0);
-    kind.set_memory_displacement64(0);
-    code.add_instruction(kind)?;
-    code.jmp(comparison.ip())?;
+    value.set_code(Code::Cmp_rm32_imm8);
+    value.set_op1_kind(OpKind::Immediate8to32);
+    value.set_immediate8(0);
+    value.set_memory_displacement64(value.memory_displacement64().wrapping_sub(4));
+    code.add_instruction(value)?;
+    code.jne(branch.near_branch_target())?;
+    code.jmp(if result.ip() == comparison.ip() {
+        continuation
+    } else {
+        branch.next_ip()
+    })?;
     let bytes = code.assemble(result.ip())?;
     if result.ip() + bytes.len() as u64 > continuation {
         return Err("登录结果判定的指令空间不足".into());
@@ -300,16 +314,6 @@ fn prepare(
         range: offset..offset + bytes.len(),
         bytes,
     }];
-    let mut comparison = *comparison;
-    comparison.set_immediate32(0);
-    let mut code = CodeAssembler::new(64)?;
-    code.add_instruction(comparison)?;
-    let bytes = code.assemble(comparison.ip())?;
-    let offset = image.offset(comparison.ip())?;
-    edits.push(Edit {
-        range: offset..offset + bytes.len(),
-        bytes,
-    });
     step.record(format!(
         "RVA 0x{:08X}；读取错误码和错误类型 → 原清理分支",
         result.ip() - image.base(),
