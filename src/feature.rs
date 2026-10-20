@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    Result, browser, coexist, credentials, emoticon,
+    Result, appex, browser, coexist, credentials, emoticon,
     image::{Image, References, Symbols},
     login, notify,
     progress::Progress,
@@ -166,6 +166,7 @@ pub const FEATURES: &[Feature] = &[
     resources::FEATURE,
     emoticon::FEATURE,
     browser::FEATURE,
+    appex::FEATURE,
     notify::FEATURE,
     tray::FEATURE,
     remote::FEATURE,

@@ -1,3 +1,4 @@
+mod appex;
 mod browser;
 mod coexist;
 mod credentials;
