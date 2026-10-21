@@ -19,6 +19,7 @@ mod resources;
 mod revoke;
 mod sound;
 mod store;
+mod timestamps;
 mod tray;
 mod tui;
 mod uia;
