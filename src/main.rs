@@ -19,6 +19,7 @@ mod resources;
 mod revoke;
 mod sound;
 mod store;
+mod time;
 mod timestamps;
 mod tray;
 mod tui;
@@ -54,6 +55,7 @@ BetterWX
 文件可选 Weixin.exe 或 Weixin.dll。
 省略路径时，读取微信安装目录中的最新版本。
 系统通知头像模式：square 方形、circle 圆形。
+时间格式模式：seconds 精确到秒、full 完整时间。
 restore：还原已备份的原版文件。
 --force：确认以当前文件作为备份和补丁基准。";
 
@@ -299,7 +301,9 @@ fn run() -> Result<()> {
             println!(
                 "{}：{}",
                 feature.name,
-                if !enable {
+                if !enable && feature.id == time::FEATURE.id {
+                    "已恢复默认"
+                } else if !enable {
                     "已关闭"
                 } else if patch.edits.as_ref().expect("modes").len() == 1 {
                     "已启用"

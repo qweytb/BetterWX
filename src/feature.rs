@@ -11,7 +11,7 @@ use crate::{
     progress::Progress,
     remote, resources, revoke, sound,
     store::{self, Content, Store},
-    timestamps, tray, uia, updates, writable,
+    time, timestamps, tray, uia, updates, writable,
 };
 
 pub type Edits = BTreeMap<PathBuf, Vec<Edit>>;
@@ -130,6 +130,7 @@ impl Prepared {
 
     pub fn label(&self, state: State) -> &'static str {
         match state {
+            State::Disabled if self.feature.id == time::FEATURE.id => "默认",
             State::Disabled => "关闭",
             State::Enabled(mode) => self.edits.as_ref().expect("mode not prepared")[mode].name,
             State::Partial => "部分开启",
@@ -164,6 +165,7 @@ pub const FEATURES: &[Feature] = &[
     credentials::FEATURE,
     revoke::FEATURE,
     timestamps::FEATURE,
+    time::FEATURE,
     resources::FEATURE,
     writable::FEATURE,
     emoticon::FEATURE,

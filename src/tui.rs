@@ -1062,6 +1062,9 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                 let label = patch.feature.name.to_owned();
                 let value = if pending == Some(index) {
                     let action = match patch.next(&store) {
+                        None if patch.feature.id == crate::time::FEATURE.id => {
+                            "恢复默认".to_owned()
+                        }
                         None => "关闭".to_owned(),
                         Some(mode) if multiple => {
                             format!("切换为{}", patch.label(feature::State::Enabled(mode)))
