@@ -129,15 +129,15 @@ fn signature(path: &Path) -> Result<()> {
     }
     match status {
         0 => Ok(()),
-        TRUST_E_BAD_DIGEST => Err("文件内容与数字签名不符".into()),
-        TRUST_E_NOSIGNATURE => Err("文件没有数字签名".into()),
-        _ => Err(format!("数字签名验证失败：{}", Error::from_hresult(HRESULT(status)),).into()),
+        TRUST_E_BAD_DIGEST => Err("文件内容存在改动".into()),
+        TRUST_E_NOSIGNATURE => Err("文件缺少校验信息".into()),
+        _ => Err(format!("无法检查文件改动：{}", Error::from_hresult(HRESULT(status)),).into()),
     }
 }
 
 #[cfg(not(windows))]
 fn signature(_path: &Path) -> Result<()> {
-    Err("验证文件签名需要 Windows".into())
+    Err("检查文件改动需要 Windows".into())
 }
 
 impl Store {
@@ -259,12 +259,12 @@ impl File {
         let original = if backup.try_exists()? {
             Arc::new(read(&backup, progress, "载入文件")?)
         } else {
-            let step = progress.activity("检查基准文件");
+            let step = progress.activity("检查文件改动");
             step.detail(display(target));
             source_issue = signature(target)
                 .err()
                 .map(|error| format!("{} 缺少原版备份，{error}", display(target)));
-            step.finish(source_issue.as_deref().unwrap_or("签名有效"));
+            step.finish(source_issue.as_deref().unwrap_or("未发现改动"));
             current.clone()
         };
         Ok(Self {

@@ -268,7 +268,8 @@ impl Screen {
                 let _ = sender.send(operation(&worker_progress));
             });
             let mut cancelled = false;
-            let mut deadline = Instant::now();
+            let started = Instant::now();
+            let mut deadline = started;
             loop {
                 let (width, height) = terminal::size()?;
                 let steps = progress.steps();
@@ -296,23 +297,25 @@ impl Screen {
                     let name = step.group.as_deref().unwrap_or(&step.name);
                     step.request();
                     let mut detail = text.detail.lines();
-                    if step.total != 0 {
-                        let heading = format!(
+                    let heading = if step.total != 0 {
+                        format!(
                             "{name}：{}/{} {}；",
                             step.completed(),
                             step.total,
                             step.unit
-                        );
-                        let size = (width as usize).saturating_sub(heading.width());
-                        current.push(style(clip(
-                            &format!("{heading}{}", bar(step, size)),
-                            width as usize,
-                        )));
+                        )
                     } else {
-                        current.push(style(clip(
-                            &format!("{name}：{}", detail.next().unwrap_or_default()),
-                            width as usize,
-                        )));
+                        format!("{name}：")
+                    };
+                    let size = (width as usize).saturating_sub(heading.width());
+                    current.push(style(clip(
+                        &format!("{heading}{}", bar(step, size, started.elapsed())),
+                        width as usize,
+                    )));
+                    if step.total == 0
+                        && let Some(line) = detail.next()
+                    {
+                        current.push(style(clip(&format!("  {line}"), width as usize)));
                     }
                     current.push(style(clip(
                         &format!("  {}", detail.collect::<Vec<_>>().join("；")),
@@ -567,12 +570,16 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn bar(step: &Step, width: usize) -> String {
-    let fraction = if step.total == 0 {
-        1.0
-    } else {
-        step.completed() as f64 / step.total as f64
-    };
+fn bar(step: &Step, width: usize, elapsed: Duration) -> String {
+    if step.total == 0 {
+        let mut cells = vec![' '; width];
+        cells[..width.div_ceil(4)].fill('█');
+        if !cells.is_empty() {
+            cells.rotate_right((elapsed.as_millis() / 50) as usize % width);
+        }
+        return cells.into_iter().collect();
+    }
+    let fraction = step.completed() as f64 / step.total as f64;
     let cells = width.saturating_sub(8);
     let units = (fraction * cells as f64 * 8.0) as usize;
     let whole = units / 8;
