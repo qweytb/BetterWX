@@ -189,6 +189,11 @@ impl Screen {
         notice: &str,
         help: &str,
     ) -> Result<bool> {
+        let label_width = items
+            .iter()
+            .map(|item| item.label.content().width())
+            .max()
+            .unwrap_or_default();
         loop {
             let (width, height) = terminal::size()?;
             let mut footer = Vec::new();
@@ -221,9 +226,10 @@ impl Screen {
             lines.extend(items.iter().enumerate().skip(start).take(visible).map(
                 |(index, item)| {
                     item.label.style().apply(format!(
-                        "  {} {}    {}",
+                        "  {} {}{}    {}",
                         item.marker,
                         item.label.content(),
+                        " ".repeat(label_width - item.label.content().width()),
                         if index == *selected { &item.value } else { "" },
                     ))
                 },
@@ -234,7 +240,9 @@ impl Screen {
                 lines,
                 Some((
                     offset + *selected - start,
-                    item.label.content().chars().count() + 7,
+                    item.label.content().chars().count() + label_width
+                        - item.label.content().width()
+                        + 7,
                 )),
             )?;
             let Some(key) = self.key()? else {
@@ -406,7 +414,11 @@ impl Screen {
         if let Some(error) = error
             && !terminate
         {
-            return Ok((cfg!(windows), error));
+            return Ok(if cfg!(windows) {
+                (true, String::new())
+            } else {
+                (false, error)
+            });
         }
         let detail = format!(" -- {}", version(&store.target));
         let notice = match self.work("写入", &detail, |progress| {
@@ -690,8 +702,10 @@ fn coexist(
         let error = patch.issue(store);
         let mut items = vec![Item {
             marker: if enabled { "■" } else { "□" },
-            label: if error.is_some() || pending {
+            label: if error.is_some() {
                 "共存支持".to_owned().red()
+            } else if pending {
+                "共存支持".to_owned().dark_green()
             } else {
                 style("共存支持".to_owned())
             },
@@ -866,8 +880,10 @@ fn sounds(
         let error = patch.issue(store);
         let mut items = vec![Item {
             marker: if enabled { "■" } else { "□" },
-            label: if error.is_some() || pending {
+            label: if error.is_some() {
                 "外置提示音支持".to_owned().red()
+            } else if pending {
+                "外置提示音支持".to_owned().dark_green()
             } else {
                 style("外置提示音支持".to_owned())
             },
@@ -946,8 +962,10 @@ fn icon(
         let error = patch.issue(store);
         let mut items = vec![Item {
             marker: if enabled { "■" } else { "□" },
-            label: if error.is_some() || pending {
+            label: if error.is_some() {
                 "外置图标支持".to_owned().red()
+            } else if pending {
+                "外置图标支持".to_owned().dark_green()
             } else {
                 style("外置图标支持".to_owned())
             },
@@ -1097,8 +1115,10 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                     } else {
                         "□"
                     },
-                    label: if error.is_some() || pending == Some(index) {
+                    label: if error.is_some() {
                         label.red()
+                    } else if pending == Some(index) {
+                        label.dark_green()
                     } else {
                         style(label)
                     },
@@ -1110,9 +1130,8 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
             })
             .collect();
         if outdated {
-            let mut update = Item::action(style("更新补丁"));
+            let mut update = Item::action("更新补丁".dark_green());
             if pending == Some(prepared.len() + 1) {
-                update.label = update.label.red();
                 update.value = occupied("更新");
             }
             items.insert(0, update);
@@ -1120,7 +1139,7 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
         let mut restore = Item::action(style("恢复原版"));
         restore.detail = "还原已备份的原版文件".to_owned();
         if pending == Some(prepared.len()) {
-            restore.label = restore.label.red();
+            restore.label = restore.label.dark_green();
             restore.value = occupied("恢复");
         } else if store.changed().is_empty() {
             restore.value = if store.files.values().any(|file| file.source_issue.is_some()) {
