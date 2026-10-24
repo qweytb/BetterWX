@@ -1,26 +1,35 @@
 use std::{collections::BTreeMap, ops::Range};
 
-use iced_x86::{Code, Instruction, MemoryOperand, Mnemonic, OpKind, Register};
+use iced_x86::{Code, Encoder, Instruction, MemoryOperand, Mnemonic, OpKind, Register};
 
 use crate::{
     Result,
     feature::{Analysis, Edit, Feature, Mode, Target},
     image::{Image, References, Symbols, argument, calls, functions},
+    probe,
     progress::Progress,
     xlog,
 };
 
 const FILTER: &str = "virtual mmui::WeChatNativeEventFilter::nativeEventFilter";
+const CHECK: &str = "kernel::service::CheckCallbackWin";
 
 pub const FEATURE: Feature = Feature {
     id: "remote",
-    name: "兼容模拟输入",
-    description: "修正模拟输入导致自动退出登录的问题",
-    targets: &[Target {
-        file: None,
-        find,
-        scan,
-    }],
+    name: "兼容外部工具",
+    description: "缓解模拟输入、无障碍、Agent、远控兼容性",
+    targets: &[
+        Target {
+            file: None,
+            find,
+            scan,
+        },
+        Target {
+            file: Some("wcprobe.dll"),
+            find: probe::find,
+            scan: probe::scan,
+        },
+    ],
 };
 
 struct Scan {
@@ -28,7 +37,7 @@ struct Scan {
 }
 
 fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
-    xlog::find(image, &[FILTER, "wechat_application.cc"], progress)
+    xlog::find(image, &[FILTER, "wechat_application.cc", CHECK], progress)
 }
 
 fn scan(symbols: Symbols) -> Box<dyn Analysis> {
@@ -255,10 +264,51 @@ impl Analysis for Scan {
             instruction.set_ip(image.end() + offset as u64);
         }
         body.splice(index + 1..index + 1, added);
-        let edits = image.reencode(function, &body)?;
+        let mut edits = image.reencode(function, &body)?;
         step.finish(format!(
             "输入来源；RVA 0x{:08X}；2 → 1",
             address - image.base(),
+        ));
+
+        let checks = functions(CHECK, &self.symbols, references);
+        let [check] = checks.values().collect::<Vec<_>>()[..] else {
+            return Err("无法唯一定位捕获状态回调".into());
+        };
+        let body = image.instructions(check)?;
+        let flags = body
+            .iter()
+            .enumerate()
+            .filter(|(index, instruction)| {
+                instruction.code() == Code::Test_rm8_imm8
+                    && instruction.op0_kind() == OpKind::Register
+                    && instruction.immediate8() == 1
+                    && body[index + 1..].iter().any(|test| {
+                        test.code() == Code::Test_rm8_imm8
+                            && test.op0_register() == instruction.op0_register()
+                            && test.immediate8() == 2
+                    })
+            })
+            .map(|(_, instruction)| instruction)
+            .collect::<Vec<_>>();
+        let [flags] = flags[..] else {
+            return Err("无法唯一定位捕获活动状态".into());
+        };
+        let step = progress.activity("准备捕获状态补丁");
+        let instruction = Instruction::with2(Code::And_rm8_imm8, flags.op0_register(), 1)?;
+        let mut encoder = Encoder::new(64);
+        encoder.encode(&instruction, flags.ip())?;
+        let bytes = encoder.take_buffer();
+        if bytes.len() != flags.len() {
+            return Err("捕获状态指令长度与原指令不同".into());
+        }
+        let offset = image.offset(flags.ip())?;
+        edits.push(Edit {
+            range: offset..offset + bytes.len(),
+            bytes,
+        });
+        step.finish(format!(
+            "捕获活动；RVA 0x{:08X}；TEST → AND",
+            flags.ip() - image.base(),
         ));
         Ok(vec![Mode::enabled(edits)])
     }

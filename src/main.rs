@@ -10,6 +10,7 @@ mod install;
 mod instance;
 mod login;
 mod notify;
+mod probe;
 #[cfg(windows)]
 mod process;
 mod progress;
