@@ -264,7 +264,6 @@ fn prepare(
                     && instruction.op0_register() == comparison.op0_register()
                     && instruction.op1_kind() == OpKind::Memory
                     && !instruction.is_ip_rel_memory_operand()
-                    && instruction.memory_displacement64() == 4
             })
             .ok_or("无法定位登录请求错误码")?
     };
