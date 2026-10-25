@@ -117,18 +117,8 @@ pub fn resolve(path: PathBuf) -> Result<PathBuf> {
     Ok(target)
 }
 
-#[cfg(windows)]
 pub fn pick() -> Result<Option<PathBuf>> {
-    native_dialog::DialogBuilder::file()
-        .set_title("手动选择")
-        .add_filter("微信程序", ["exe", "dll"])
-        .open_single_file()
-        .show()?
+    crate::dialog::pick("手动选择", vec![("微信程序", "*.exe;*.dll")])?
         .map(resolve)
         .transpose()
-}
-
-#[cfg(not(windows))]
-pub fn pick() -> Result<Option<PathBuf>> {
-    Err("系统文件选择器需要 Windows".into())
 }

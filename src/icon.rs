@@ -121,17 +121,8 @@ pub fn cleanup(store: &mut Store, prepared: &[Prepared], progress: &Progress) ->
     Ok(())
 }
 
-#[cfg(windows)]
 pub fn pick() -> Result<Option<PathBuf>> {
-    Ok(native_dialog::DialogBuilder::file()
-        .set_title("更换托盘图标")
-        .open_single_file()
-        .show()?)
-}
-
-#[cfg(not(windows))]
-pub fn pick() -> Result<Option<PathBuf>> {
-    Err("系统文件选择器需要 Windows".into())
+    crate::dialog::pick("更换托盘图标", Vec::new())
 }
 
 fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {

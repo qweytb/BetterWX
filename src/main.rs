@@ -2,6 +2,7 @@ mod appex;
 mod browser;
 mod coexist;
 mod credentials;
+mod dialog;
 mod emoticon;
 mod feature;
 mod icon;

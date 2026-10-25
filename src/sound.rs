@@ -105,17 +105,8 @@ pub fn get(id: &str) -> Result<&'static Sound> {
         .ok_or_else(|| format!("未知提示音：{id}").into())
 }
 
-#[cfg(windows)]
 pub fn pick(sound: &Sound) -> Result<Option<PathBuf>> {
-    Ok(native_dialog::DialogBuilder::file()
-        .set_title(format!("更换提示音：{}", sound.name))
-        .open_single_file()
-        .show()?)
-}
-
-#[cfg(not(windows))]
-pub fn pick(_sound: &Sound) -> Result<Option<PathBuf>> {
-    Err("系统文件选择器需要 Windows".into())
+    crate::dialog::pick(&format!("更换提示音：{}", sound.name), Vec::new())
 }
 
 pub fn initialize(store: &Store, patch: &Prepared, progress: &Progress) -> Result<()> {
