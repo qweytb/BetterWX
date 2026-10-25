@@ -295,18 +295,8 @@ impl Screen {
                     .map(style)
                     .collect();
                 lines.push(style(String::new()));
-                let mut logs = Vec::new();
+                let records = progress.records();
                 let mut current = Vec::new();
-                for record in progress.records() {
-                    let name = record.group.as_deref().unwrap_or(&record.name);
-                    for line in record.detail.lines() {
-                        logs.extend(
-                            wrap(&format!("{name}：{line}"), width as usize)
-                                .into_iter()
-                                .map(style),
-                        );
-                    }
-                }
                 if let Some((step, text)) = steps.iter().rev().find_map(|step| {
                     let text = step.text();
                     (!text.finished).then_some((step, text))
@@ -340,8 +330,16 @@ impl Screen {
                     )));
                 }
                 let available = (height as usize).saturating_sub(lines.len() + current.len() + 4);
-                let skip = logs.len().saturating_sub(available);
-                lines.extend(logs.into_iter().skip(skip));
+                let logs = records.iter().flat_map(|record| {
+                    let name = record.group.as_deref().unwrap_or(&record.name);
+                    record.detail.lines().flat_map(move |line| {
+                        wrap(&format!("{name}：{line}"), width as usize)
+                            .into_iter()
+                            .map(style)
+                    })
+                });
+                let logs: Vec<_> = logs.rev().take(available).collect();
+                lines.extend(logs.into_iter().rev());
                 lines.extend(current);
                 lines.push(style(String::new()));
                 lines.push(

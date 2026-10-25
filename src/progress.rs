@@ -20,7 +20,7 @@ pub struct Step {
     completed: Arc<AtomicU64>,
     requested: Arc<AtomicBool>,
     text: Arc<Mutex<Text>>,
-    records: Arc<Mutex<Vec<Record>>>,
+    records: Arc<Mutex<Vec<Arc<Record>>>>,
 }
 
 #[derive(Clone, Default)]
@@ -53,11 +53,11 @@ impl Step {
         self.records
             .lock()
             .expect("progress lock poisoned")
-            .push(Record {
+            .push(Arc::new(Record {
                 group: self.group.clone(),
                 name: self.name.clone(),
                 detail: detail.into(),
-            });
+            }));
     }
 
     pub fn request(&self) {
@@ -84,7 +84,7 @@ impl Step {
 pub struct Progress {
     group: Option<String>,
     steps: Arc<Mutex<Vec<Step>>>,
-    records: Arc<Mutex<Vec<Record>>>,
+    records: Arc<Mutex<Vec<Arc<Record>>>>,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -124,18 +124,19 @@ impl Progress {
             .last_mut()
             .filter(|record| record.group == self.group && record.name == name)
         {
+            let record = Arc::make_mut(record);
             record.detail.push('、');
             record.detail.push_str(item);
         } else {
-            records.push(Record {
+            records.push(Arc::new(Record {
                 group: self.group.clone(),
                 name: name.to_owned(),
                 detail: item.to_owned(),
-            });
+            }));
         }
     }
 
-    pub fn records(&self) -> Vec<Record> {
+    pub fn records(&self) -> Vec<Arc<Record>> {
         self.records.lock().expect("progress lock poisoned").clone()
     }
 
