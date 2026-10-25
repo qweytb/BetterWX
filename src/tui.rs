@@ -698,7 +698,8 @@ fn coexist(
     let mut pending = false;
     let mut notice = String::new();
     loop {
-        let enabled = patch.state(store).enabled();
+        let state = patch.state(store);
+        let enabled = state.enabled();
         let error = patch.issue(store);
         let mut items = vec![Item {
             marker: if enabled { "■" } else { "□" },
@@ -713,10 +714,8 @@ fn coexist(
                 occupied(if enabled { "关闭" } else { "开启" })
             } else if error.is_some() {
                 "不可用".to_owned()
-            } else if enabled {
-                "已启用".to_owned()
             } else {
-                "未启用".to_owned()
+                patch.label(state).to_owned()
             },
             detail: error
                 .cloned()
@@ -750,7 +749,7 @@ fn coexist(
         }
         items.push(Item::action(style("返回")));
         if !screen.select(
-            patch.feature.name,
+            "共存",
             &detail,
             &items,
             &mut selected,
@@ -876,7 +875,8 @@ fn sounds(
     let mut pending = false;
     let mut notice = String::new();
     loop {
-        let enabled = patch.state(store).enabled();
+        let state = patch.state(store);
+        let enabled = state.enabled();
         let error = patch.issue(store);
         let mut items = vec![Item {
             marker: if enabled { "■" } else { "□" },
@@ -891,10 +891,8 @@ fn sounds(
                 occupied(if enabled { "关闭" } else { "开启" })
             } else if error.is_some() {
                 "不可用".to_owned()
-            } else if enabled {
-                "已启用".to_owned()
             } else {
-                "未启用".to_owned()
+                patch.label(state).to_owned()
             },
             detail: error
                 .cloned()
@@ -909,7 +907,7 @@ fn sounds(
         }
         items.push(Item::action(style("返回")));
         if !screen.select(
-            patch.feature.name,
+            "提示音",
             &detail,
             &items,
             &mut selected,
@@ -954,34 +952,51 @@ fn icon(
 ) -> Result<()> {
     let detail = format!(" -- {}", version(&store.target));
     let path = crate::icon::path(&store.target)?;
+    let flash = prepared
+        .iter()
+        .find(|patch| patch.feature.id == crate::tray::FEATURE.id)
+        .ok_or("找不到托盘闪烁功能")?;
+    let patches = [flash, patch];
     let mut selected = 0;
-    let mut pending = false;
+    let mut pending = None;
     let mut notice = String::new();
     loop {
         let enabled = patch.state(store).enabled();
-        let error = patch.issue(store);
-        let mut items = vec![Item {
-            marker: if enabled { "■" } else { "□" },
-            label: if error.is_some() {
-                "外置图标支持".to_owned().red()
-            } else if pending {
-                "外置图标支持".to_owned().dark_green()
-            } else {
-                style("外置图标支持".to_owned())
-            },
-            value: if pending {
-                occupied(if enabled { "关闭" } else { "开启" })
-            } else if error.is_some() {
-                "不可用".to_owned()
-            } else if enabled {
-                "已启用".to_owned()
-            } else {
-                "未启用".to_owned()
-            },
-            detail: error
-                .cloned()
-                .unwrap_or_else(|| patch.feature.description.to_owned()),
-        }];
+        let mut items: Vec<_> = patches
+            .iter()
+            .enumerate()
+            .map(|(index, patch)| {
+                let state = patch.state(store);
+                let enabled = state.enabled();
+                let error = patch.issue(store);
+                let label = if index == 0 {
+                    patch.feature.name
+                } else {
+                    "外置图标支持"
+                }
+                .to_owned();
+                Item {
+                    marker: if enabled { "■" } else { "□" },
+                    label: if error.is_some() {
+                        label.red()
+                    } else if pending == Some(index) {
+                        label.dark_green()
+                    } else {
+                        style(label)
+                    },
+                    value: if pending == Some(index) {
+                        occupied(if enabled { "关闭" } else { "开启" })
+                    } else if error.is_some() {
+                        "不可用".to_owned()
+                    } else {
+                        patch.label(state).to_owned()
+                    },
+                    detail: error
+                        .cloned()
+                        .unwrap_or_else(|| patch.feature.description.to_owned()),
+                }
+            })
+            .collect();
         if enabled {
             for label in ["更换图标", "恢复默认"] {
                 let mut item = Item::action(style(label));
@@ -991,7 +1006,7 @@ fn icon(
         }
         items.push(Item::action(style("返回")));
         if !screen.select(
-            patch.feature.name,
+            "托盘图标",
             &detail,
             &items,
             &mut selected,
@@ -1001,24 +1016,23 @@ fn icon(
         {
             return Ok(());
         }
-        if selected == 0 {
+        if let Some(patch) = patches.get(selected) {
             if let Some(error) = patch.issue(store) {
                 notice = error.clone();
                 continue;
             }
-            (pending, notice) = screen.change(
-                store,
-                prepared,
-                Change::Feature(patch, (!enabled).then_some(0)),
-                pending,
-            )?;
+            let change = Change::Feature(patch, patch.next(store));
+            let (retry, message) =
+                screen.change(store, prepared, change, pending == Some(selected))?;
+            pending = retry.then_some(selected);
+            notice = message;
             if screen.exiting {
                 return Ok(());
             }
             continue;
         }
-        pending = false;
-        let file = if selected == 1 {
+        pending = None;
+        let file = if selected == patches.len() {
             match crate::icon::pick() {
                 Ok(Some(path)) => Some(path),
                 Ok(None) => continue,
@@ -1031,8 +1045,10 @@ fn icon(
             None
         };
         notice = match screen.work(patch.feature.name, &detail, |progress| match selected {
-            1 => crate::icon::import(store, file.as_deref().ok_or("缺少图片文件")?, progress),
-            2 => crate::icon::restore(store, patch, progress),
+            index if index == patches.len() => {
+                crate::icon::import(store, file.as_deref().ok_or("缺少图片文件")?, progress)
+            }
+            index if index == patches.len() + 1 => crate::icon::restore(store, patch, progress),
             _ => unreachable!(),
         }) {
             Ok(_) => String::new(),
@@ -1055,6 +1071,10 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
     else {
         return Ok(());
     };
+    let menu: Vec<_> = prepared
+        .iter()
+        .filter(|patch| patch.feature.id != crate::tray::FEATURE.id)
+        .collect();
     let mut selected = 0;
     let mut notice = store
         .files
@@ -1066,18 +1086,19 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
     loop {
         let outdated = store.files.values().any(|file| file.issue.is_some());
         let offset = usize::from(outdated);
-        let mut items: Vec<Item> = prepared
+        let mut items: Vec<Item> = menu
             .iter()
             .enumerate()
             .map(|(index, patch)| {
-                if [
-                    crate::coexist::FEATURE.id,
-                    crate::sound::FEATURE.id,
-                    crate::icon::FEATURE.id,
+                if let Some((_, name)) = [
+                    (crate::coexist::FEATURE.id, "共存"),
+                    (crate::sound::FEATURE.id, "提示音"),
+                    (crate::icon::FEATURE.id, "托盘图标"),
                 ]
-                .contains(&patch.feature.id)
+                .into_iter()
+                .find(|(id, _)| *id == patch.feature.id)
                 {
-                    let mut item = Item::action(style(patch.feature.name));
+                    let mut item = Item::action(style(name));
                     item.detail = patch.feature.description.to_owned();
                     return item;
                 }
@@ -1087,9 +1108,6 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                 let label = patch.feature.name.to_owned();
                 let value = if pending == Some(index) {
                     let action = match patch.next(&store) {
-                        None if patch.feature.id == crate::time::FEATURE.id => {
-                            "恢复默认".to_owned()
-                        }
                         None => "关闭".to_owned(),
                         Some(mode) if multiple => {
                             format!("切换为{}", patch.label(feature::State::Enabled(mode)))
@@ -1100,12 +1118,8 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                 } else {
                     if error.is_some() {
                         "不可用"
-                    } else if multiple {
-                        patch.label(state)
-                    } else if state.enabled() {
-                        "已启用"
                     } else {
-                        "未启用"
+                        patch.label(state)
                     }
                     .to_owned()
                 };
@@ -1131,14 +1145,14 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
             .collect();
         if outdated {
             let mut update = Item::action("更新补丁".dark_green());
-            if pending == Some(prepared.len() + 1) {
+            if pending == Some(menu.len() + 1) {
                 update.value = occupied("更新");
             }
             items.insert(0, update);
         }
         let mut restore = Item::action(style("恢复原版"));
         restore.detail = "还原已备份的原版文件".to_owned();
-        if pending == Some(prepared.len()) {
+        if pending == Some(menu.len()) {
             restore.label = restore.label.dark_green();
             restore.value = occupied("恢复");
         } else if store.changed().is_empty() {
@@ -1161,7 +1175,7 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
             return Ok(());
         };
         let index = if outdated && selected == 0 {
-            prepared.len() + 1
+            menu.len() + 1
         } else {
             selected - offset
         };
@@ -1183,7 +1197,7 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                     continue;
                 }
             }
-        } else if let Some(patch) = prepared.get(index) {
+        } else if let Some(patch) = menu.get(index) {
             if [
                 crate::coexist::FEATURE.id,
                 crate::sound::FEATURE.id,
@@ -1213,7 +1227,7 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                 continue;
             }
             Change::Feature(patch, patch.next(&store))
-        } else if index == prepared.len() {
+        } else if index == menu.len() {
             Change::Restore
         } else {
             return Ok(());

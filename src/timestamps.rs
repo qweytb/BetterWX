@@ -24,7 +24,7 @@ const FUNCTIONS: &[&str] = &[
 pub const FEATURE: Feature = Feature {
     id: "timestamps",
     name: "逐条显示时间",
-    description: "显示每条消息的时间",
+    description: "每条消息都显示时间",
     targets: &[Target {
         file: None,
         find,

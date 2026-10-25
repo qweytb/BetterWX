@@ -22,7 +22,7 @@ const SECONDS: &str = " hh:mm:ss\0";
 pub const FEATURE: Feature = Feature {
     id: "time-format",
     name: "时间格式",
-    description: "显示秒数，完整样式同时显示日期与星期",
+    description: "可以精确到秒，也可以始终显示完整的日期时间",
     targets: &[Target {
         file: None,
         find,

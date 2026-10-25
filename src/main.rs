@@ -299,19 +299,7 @@ fn run() -> Result<()> {
             if feature.id == icon::FEATURE.id && !enable {
                 icon::cleanup(&mut store, &prepared, &progress)?;
             }
-            println!(
-                "{}：{}",
-                feature.name,
-                if !enable && feature.id == time::FEATURE.id {
-                    "已恢复默认"
-                } else if !enable {
-                    "已关闭"
-                } else if patch.edits.as_ref().expect("modes").len() == 1 {
-                    "已启用"
-                } else {
-                    patch.label(requested)
-                }
-            );
+            println!("{}：{}", feature.name, patch.label(requested));
         }
         "update" => {
             let contents = feature::rebuild(&store, &prepared, &progress)?;

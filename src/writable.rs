@@ -15,8 +15,8 @@ const PREPARE: &str = "kernel::fileutil::PrepareWriteableFile";
 
 pub const FEATURE: Feature = Feature {
     id: "writable",
-    name: "解除文件只读",
-    description: "保存文件时取消只读属性",
+    name: "不要只读保存",
+    description: "不要以只读方式保存文件",
     targets: &[Target {
         file: None,
         find,

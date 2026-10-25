@@ -76,7 +76,7 @@ impl<T> Mode<T> {
     pub fn enabled(edits: T) -> Self {
         Self {
             id: "enabled",
-            name: "开启",
+            name: "已启用",
             edits,
         }
     }
@@ -130,10 +130,9 @@ impl Prepared {
 
     pub fn label(&self, state: State) -> &'static str {
         match state {
-            State::Disabled if self.feature.id == time::FEATURE.id => "默认",
-            State::Disabled => "关闭",
+            State::Disabled => "未启用",
             State::Enabled(mode) => self.edits.as_ref().expect("mode not prepared")[mode].name,
-            State::Partial => "部分开启",
+            State::Partial => "部分启用",
         }
     }
 
@@ -164,21 +163,21 @@ pub const FEATURES: &[Feature] = &[
     login::FEATURE,
     credentials::FEATURE,
     revoke::FEATURE,
-    timestamps::FEATURE,
+    notify::FEATURE,
     time::FEATURE,
-    resources::FEATURE,
-    writable::FEATURE,
+    timestamps::FEATURE,
     emoticon::FEATURE,
+    writable::FEATURE,
+    resources::FEATURE,
     browser::FEATURE,
     appex::FEATURE,
-    notify::FEATURE,
-    tray::FEATURE,
-    remote::FEATURE,
     uia::FEATURE,
+    remote::FEATURE,
     updates::FEATURE,
-    icon::FEATURE,
-    sound::FEATURE,
     coexist::FEATURE,
+    sound::FEATURE,
+    icon::FEATURE,
+    tray::FEATURE,
 ];
 
 pub fn targets(target: &Path) -> Result<Vec<PathBuf>> {
