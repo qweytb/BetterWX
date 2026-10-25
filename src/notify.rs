@@ -1837,10 +1837,9 @@ fn prepare(
 
 fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
     let mut symbols = xlog::find(image, FUNCTIONS, progress)?;
-    for name in [CAPTURE, FACTORY, STRING, STRING_DELETE, STRING_BUFFER] {
-        let bytes: Vec<_> = name.bytes().chain([0]).collect();
-        symbols.insert(name.to_owned(), image.find(name, &bytes, progress)?);
-    }
+    let values = [CAPTURE, FACTORY, STRING, STRING_DELETE, STRING_BUFFER]
+        .map(|name| (name, name.bytes().chain([0]).collect::<Vec<_>>()));
+    symbols.extend(image.find_many(values, progress)?);
     Ok(symbols)
 }
 

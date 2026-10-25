@@ -36,12 +36,10 @@ struct Scan {
 
 fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
     let mut symbols = xlog::find(image, &[VIEW, MODEL], progress)?;
-    for text in [SHORT, SPACE, SECONDS] {
-        symbols.insert(
-            text.to_owned(),
-            image.find(text, text.as_bytes(), progress)?,
-        );
-    }
+    symbols.extend(image.find_many(
+        [SHORT, SPACE, SECONDS].map(|text| (text, text.as_bytes())),
+        progress,
+    )?);
     Ok(symbols)
 }
 

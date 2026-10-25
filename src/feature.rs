@@ -421,18 +421,32 @@ pub fn inspect(store: &mut Store, prepared: &[Prepared], progress: &Progress) ->
                 enabled.insert(patch.feature.id.to_owned(), mode);
             }
         }
-        let expected = generate(&file.original, &enabled, prepared, target)?;
+        let mut expected = Vec::new();
+        let mut position = 0;
+        for edit in edits(&enabled, prepared, target)? {
+            expected.push(&file.original[position..edit.range.start]);
+            expected.push(edit.bytes.as_slice());
+            position = edit.range.end;
+        }
+        expected.push(&file.original[position..]);
         let mut offset = 0;
         let difference = expected
-            .chunks(1024 * 1024)
-            .zip(file.current.chunks(1024 * 1024))
-            .find_map(|(expected, current)| {
-                let difference = expected
-                    .iter()
-                    .zip(current)
-                    .position(|(left, right)| left != right);
+            .into_iter()
+            .flat_map(|bytes| bytes.chunks(1024 * 1024))
+            .find_map(|expected| {
+                let end = (offset + expected.len()).min(file.current.len());
+                let current = &file.current[offset..end];
+                let difference = if expected == current {
+                    None
+                } else {
+                    expected
+                        .iter()
+                        .zip(current)
+                        .position(|(left, right)| left != right)
+                        .or_else(|| (expected.len() != current.len()).then_some(current.len()))
+                };
                 let start = offset;
-                offset += current.len();
+                offset = end;
                 step.set(offset as u64);
                 if step.sample() {
                     step.detail(format!(
@@ -441,11 +455,8 @@ pub fn inspect(store: &mut Store, prepared: &[Prepared], progress: &Progress) ->
                     ));
                 }
                 difference.map(|index| start + index)
-            })
-            .or_else(|| {
-                (expected.len() != file.current.len())
-                    .then_some(expected.len().min(file.current.len()))
             });
+        let difference = difference.or_else(|| (offset != file.current.len()).then_some(offset));
         file.issue = difference.map(|offset| {
             format!(
                 "{} 的位置 {offset:#x} 存在未识别的改动",
@@ -649,12 +660,11 @@ pub fn describe(
     Ok(())
 }
 
-fn generate(
-    original: &[u8],
+fn edits<'a>(
     enabled: &BTreeMap<String, usize>,
-    prepared: &[Prepared],
+    prepared: &'a [Prepared],
     target: &Path,
-) -> Result<Vec<u8>> {
+) -> Result<Vec<&'a Edit>> {
     let mut edits = Vec::new();
     for (id, mode) in enabled {
         let patch = prepared
@@ -676,6 +686,16 @@ fn generate(
             return Err("所选功能的修改位置重叠".into());
         }
     }
+    Ok(edits)
+}
+
+fn generate(
+    original: &[u8],
+    enabled: &BTreeMap<String, usize>,
+    prepared: &[Prepared],
+    target: &Path,
+) -> Result<Vec<u8>> {
+    let edits = edits(enabled, prepared, target)?;
     let mut output = original.to_vec();
     for edit in edits.into_iter().rev() {
         output.splice(edit.range.clone(), edit.bytes.iter().copied());

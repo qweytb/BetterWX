@@ -9,21 +9,21 @@ use crate::{Result, feature::Resources, image::Image, progress::Progress};
 
 pub fn find(image: &Image<'_>, root: &str, progress: &Progress) -> Result<Vec<u64>> {
     let encoded: Vec<_> = root.encode_utf16().flat_map(u16::to_be_bytes).collect();
+    let value: Vec<_> = u16::try_from(encoded.len() / 2)?
+        .to_be_bytes()
+        .into_iter()
+        .chain(hash(&encoded).to_be_bytes())
+        .chain(encoded)
+        .collect();
     let sections = image.sections()?;
     let mut names = BTreeSet::new();
-    for address in image.find(root, &encoded, progress)? {
-        let Some(header) = address.checked_sub(6) else {
-            continue;
-        };
+    for header in image.find(&format!("Qt 资源名称 {root}"), &value, progress)? {
         let Some((base, data, offset)) = sections.iter().find_map(|(base, data)| {
             let offset = usize::try_from(header.checked_sub(*base)?).ok()?;
-            (offset + 6 + encoded.len() <= data.len()).then_some((*base, *data, offset))
+            (offset + value.len() <= data.len()).then_some((*base, *data, offset))
         }) else {
             continue;
         };
-        if data[offset..offset + 2] != (encoded.len() as u16 / 2).to_be_bytes() {
-            continue;
-        }
         let mut pending = vec![offset];
         while let Some(end) = pending.pop() {
             progress.check()?;
@@ -37,17 +37,9 @@ pub fn find(image: &Image<'_>, root: &str, progress: &Progress) -> Result<Vec<u6
                 if length == 0 || start + 6 + length * 2 != end {
                     continue;
                 }
-                let hash =
-                    data[start + 6..end]
-                        .as_chunks::<2>()
-                        .0
-                        .iter()
-                        .fold(0u32, |hash, pair| {
-                            let hash =
-                                (hash << 4).wrapping_add(u32::from(u16::from_be_bytes(*pair)));
-                            (hash ^ ((hash & 0xf000_0000) >> 23)) & 0x0fff_ffff
-                        });
-                if hash == u32::from_be_bytes(data[start + 2..start + 6].try_into()?) {
+                if hash(&data[start + 6..end])
+                    == u32::from_be_bytes(data[start + 2..start + 6].try_into()?)
+                {
                     pending.push(start);
                 }
             }
@@ -57,6 +49,13 @@ pub fn find(image: &Image<'_>, root: &str, progress: &Progress) -> Result<Vec<u6
         return Err("找不到 Qt 资源名称表".into());
     }
     Ok(names.into_iter().collect())
+}
+
+fn hash(data: &[u8]) -> u32 {
+    data.as_chunks::<2>().0.iter().fold(0u32, |hash, pair| {
+        let hash = (hash << 4).wrapping_add(u32::from(u16::from_be_bytes(*pair)));
+        (hash ^ ((hash & 0xf000_0000) >> 23)) & 0x0fff_ffff
+    })
 }
 
 pub struct Scan {
@@ -173,6 +172,10 @@ impl Scan {
                 image.data(address + 4, size)?;
                 let offset = image.offset(address + 4)?;
                 resources.insert(name.clone(), offset..offset + size);
+                progress.record(
+                    "定位资源",
+                    &format!("{path} → RVA {:#x}", address + 4 - image.base()),
+                );
             }
         }
         Ok(resources)

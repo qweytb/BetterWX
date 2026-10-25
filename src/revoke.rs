@@ -195,12 +195,10 @@ fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
         ],
         progress,
     )?;
-    for text in [TIME, POSITION] {
-        symbols.insert(
-            text.to_owned(),
-            image.find(text, text.as_bytes(), progress)?,
-        );
-    }
+    symbols.extend(image.find_many(
+        [TIME, POSITION].map(|text| (text, text.as_bytes())),
+        progress,
+    )?);
     Ok(symbols)
 }
 

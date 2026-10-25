@@ -6,7 +6,7 @@ use crate::{
     progress::Progress,
 };
 
-pub type Records = BTreeMap<Vec<u8>, Vec<u64>>;
+pub type Records = BTreeMap<usize, BTreeMap<Vec<u8>, Vec<u64>>>;
 
 fn decode(data: &[u8]) -> Option<Vec<u8>> {
     data.as_chunks::<2>()
@@ -46,6 +46,8 @@ fn parse(image: &Image<'_>, progress: &Progress) -> Result<Records> {
             }
             if let Some(ciphertext) = decode(&data[start + 6..end]) {
                 records
+                    .entry(ciphertext.len())
+                    .or_default()
                     .entry(ciphertext)
                     .or_default()
                     .push(address + start as u64);
@@ -62,7 +64,10 @@ fn parse(image: &Image<'_>, progress: &Progress) -> Result<Records> {
         completed += data.len() as u64;
         step.set(completed);
     }
-    step.finish(format!("{} 字符串", records.len()));
+    step.finish(format!(
+        "{} 字符串",
+        records.values().map(BTreeMap::len).sum::<usize>()
+    ));
     Ok(records)
 }
 
@@ -80,7 +85,11 @@ pub fn find(image: &Image<'_>, names: &[&str], progress: &Progress) -> Result<Sy
     let mut best = 0;
     let mut candidates = 0;
     for anchor in names {
-        for ciphertext in records.keys().filter(|value| value.len() == anchor.len()) {
+        for ciphertext in records
+            .get(&anchor.len())
+            .into_iter()
+            .flat_map(BTreeMap::keys)
+        {
             progress.check()?;
             candidates += 1;
             let stream: Vec<_> = ciphertext
@@ -99,7 +108,9 @@ pub fn find(image: &Image<'_>, names: &[&str], progress: &Progress) -> Result<Sy
                         .zip(&stream)
                         .map(|(left, right)| left ^ right)
                         .collect();
-                    records.contains_key(&encoded)
+                    records
+                        .get(&encoded.len())
+                        .is_some_and(|values| values.contains_key(&encoded))
                 })
                 .count();
             if matched > best {
@@ -133,7 +144,8 @@ pub fn find(image: &Image<'_>, names: &[&str], progress: &Progress) -> Result<Sy
                 .map(|(left, right)| left ^ right)
                 .collect();
             let addresses = records
-                .get(&encoded)
+                .get(&encoded.len())
+                .and_then(|values| values.get(&encoded))
                 .ok_or_else(|| format!("找不到日志符号：{name}"))?;
             Ok(((*name).to_owned(), addresses.clone()))
         })

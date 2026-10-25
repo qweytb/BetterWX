@@ -18,19 +18,20 @@ struct Scan {
 }
 
 pub fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
-    let mut symbols = Symbols::new();
-    for name in [HEX, QUERY, INPUT] {
+    let values = [HEX, QUERY, INPUT].map(|name| {
         let text = format!("{name}\0");
         let bytes = if name == INPUT {
             text.encode_utf16().flat_map(u16::to_le_bytes).collect()
         } else {
             text.into_bytes()
         };
-        let addresses = image.find(name, &bytes, progress)?;
-        if addresses.is_empty() {
+        (name, bytes)
+    });
+    let symbols = image.find_many(values, progress)?;
+    for name in [HEX, QUERY, INPUT] {
+        if symbols[name].is_empty() {
             return Err(format!("找不到探针符号：{name}").into());
         }
-        symbols.insert(name.to_owned(), addresses);
     }
     Ok(symbols)
 }

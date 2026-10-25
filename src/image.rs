@@ -1,6 +1,6 @@
 use std::{
     cell::OnceCell,
-    collections::{BTreeMap, BTreeSet, HashMap, hash_map::Entry},
+    collections::{BTreeMap, BTreeSet, hash_map::Entry},
     ffi::CStr,
     num::NonZero,
     ops::Range,
@@ -14,6 +14,7 @@ use object::endian::LittleEndian as LE;
 use object::pe;
 use object::read::pe::{Import, PeFile64};
 use object::read::{ExportTarget, NameOrOrdinal, Object, ObjectSection};
+use rustc_hash::FxHashMap;
 
 use crate::{Result, feature::Edit, progress::Progress, xlog::Records};
 
@@ -81,7 +82,7 @@ fn format(instructions: impl IntoIterator<Item = Instruction>) -> String {
 
 pub struct References {
     functions: Vec<Range<u64>>,
-    targets: HashMap<u64, Callers>,
+    targets: FxHashMap<u64, Callers>,
     entries: Vec<Reference>,
 }
 
@@ -465,31 +466,91 @@ impl<'a> Image<'a> {
     }
 
     pub fn find(&self, name: &str, value: &[u8], progress: &Progress) -> Result<Vec<u64>> {
-        let sections = self.sections()?;
+        Ok(self
+            .find_many([(name, value)], progress)?
+            .remove(name)
+            .expect("search result"))
+    }
+
+    pub fn find_many<'b, T: AsRef<[u8]>>(
+        &self,
+        values: impl IntoIterator<Item = (&'b str, T)>,
+        progress: &Progress,
+    ) -> Result<Symbols> {
+        let values: Vec<_> = values.into_iter().collect();
+        let Some((name, _)) = values.first() else {
+            return Ok(Symbols::new());
+        };
+        let overlap = values
+            .iter()
+            .map(|(_, value)| value.as_ref().len())
+            .max()
+            .unwrap_or_default()
+            .saturating_sub(1);
         let step = progress.activity("查找字符串");
         let target = name.trim_end_matches('\0');
-        step.detail(target.to_string());
-        let mut addresses = Vec::new();
-        for (address, data) in sections {
-            progress.check()?;
-            step.detail(format!("{target}\n搜索 RVA {:#x}", address - self.base()));
-            addresses.extend(
-                memchr::memmem::find_iter(data, value).map(|offset| address + offset as u64),
-            );
+        step.detail(target.to_owned());
+        let mut addresses = vec![Vec::new(); values.len()];
+        let mut next = vec![0; values.len()];
+        for (address, data) in self.sections()? {
+            next.fill(0);
+            for start in (0..=data.len()).step_by(1024 * 1024) {
+                progress.check()?;
+                let end = (start + 1024 * 1024).min(data.len());
+                let limit = end.saturating_add(overlap).min(data.len());
+                for (index, (name, value)) in values.iter().enumerate() {
+                    let cursor = next[index].max(start);
+                    if cursor > limit {
+                        continue;
+                    }
+                    if step.sample() {
+                        step.detail(format!(
+                            "{}；{} 处匹配\n搜索 RVA {:#x}",
+                            name.trim_end_matches('\0'),
+                            addresses[index].len(),
+                            address + cursor as u64 - self.base()
+                        ));
+                    }
+                    let value = value.as_ref();
+                    for offset in memchr::memmem::find_iter(&data[cursor..limit], value) {
+                        let offset = cursor + offset;
+                        if offset >= end && end != data.len() {
+                            break;
+                        }
+                        step.record(format!(
+                            "{} → RVA {:#x}",
+                            name.trim_end_matches('\0'),
+                            address + offset as u64 - self.base()
+                        ));
+                        addresses[index].push(address + offset as u64);
+                        next[index] = offset + value.len().max(1);
+                    }
+                }
+            }
         }
-        step.finish(if addresses.is_empty() {
+        let multiple = values.len() > 1;
+        let count = addresses.iter().map(Vec::len).sum::<usize>();
+        let summary = if multiple {
+            format!("{} 个目标；{count} 处匹配", values.len())
+        } else if count == 0 {
             format!("{target}：未找到")
         } else {
-            format!(
-                "{target} → {}",
-                addresses
-                    .iter()
-                    .map(|address| format!("RVA {:#x}", address - self.base()))
-                    .collect::<Vec<_>>()
-                    .join("、")
-            )
-        });
-        Ok(addresses)
+            format!("{target}：{count} 处匹配")
+        };
+        let mut symbols = Symbols::new();
+        for ((name, _), addresses) in values.into_iter().zip(addresses) {
+            if multiple && addresses.len() != 1 {
+                let target = name.trim_end_matches('\0');
+                step.record(if addresses.is_empty() {
+                    format!("{target}：未找到")
+                } else {
+                    format!("{target}：{} 处匹配", addresses.len())
+                });
+            }
+            symbols.insert(name.to_owned(), addresses);
+        }
+        step.finish(summary);
+        Ok(symbols)
     }
 
     pub fn references(
@@ -510,7 +571,7 @@ impl<'a> Image<'a> {
         }
         let mut references = References {
             functions: self.functions()?,
-            targets: HashMap::new(),
+            targets: FxHashMap::default(),
             entries: Vec::new(),
         };
         let step = progress.start("分析代码引用", references.functions.len() as u64, "函数");

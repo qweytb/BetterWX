@@ -241,15 +241,16 @@ fn address(symbols: &Symbols, name: &str) -> Result<u64> {
 
 fn find(image: &Image<'_>, progress: &Progress) -> Result<Symbols> {
     let mut symbols = xlog::find(image, &[INIT, OTHER], progress)?;
-    for name in [WINDOW, MUTEX] {
-        symbols.insert(name.to_owned(), image.find(name, &wide(name), progress)?);
+    let values = [WINDOW, MUTEX, CLASS]
+        .into_iter()
+        .map(|name| (name, wide(name)))
+        .chain(
+            KEYS.iter()
+                .map(|&name| (name, name.bytes().chain([0]).collect())),
+        );
+    symbols.extend(image.find_many(values, progress)?);
+    for name in [WINDOW, MUTEX].into_iter().chain(KEYS.iter().copied()) {
         address(&symbols, name)?;
-    }
-    symbols.insert(CLASS.to_owned(), image.find(CLASS, &wide(CLASS), progress)?);
-    for &key in KEYS {
-        let bytes: Vec<_> = key.bytes().chain([0]).collect();
-        symbols.insert(key.to_owned(), image.find(key, &bytes, progress)?);
-        address(&symbols, key)?;
     }
     Ok(symbols)
 }
