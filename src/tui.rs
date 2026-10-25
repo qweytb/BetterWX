@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     io::{IsTerminal, Stdout, Write, stdout},
     path::{Path, PathBuf},
     sync::mpsc::{self, RecvTimeoutError},
@@ -66,6 +66,7 @@ struct Screen {
     rows: u16,
     alternate: bool,
     exiting: bool,
+    keys: VecDeque<KeyCode>,
     #[cfg(windows)]
     pressed: std::collections::HashSet<KeyCode>,
 }
@@ -77,6 +78,7 @@ impl Screen {
             rows: 0,
             alternate: true,
             exiting: false,
+            keys: VecDeque::new(),
             #[cfg(windows)]
             pressed: Default::default(),
         };
@@ -156,6 +158,13 @@ impl Screen {
     }
 
     fn key(&mut self) -> Result<Option<KeyCode>> {
+        match self.keys.pop_front() {
+            Some(key) => Ok(Some(key)),
+            None => self.read_key(),
+        }
+    }
+
+    fn read_key(&mut self) -> Result<Option<KeyCode>> {
         let Event::Key(key) = event::read()? else {
             return Ok(None);
         };
@@ -344,9 +353,15 @@ impl Screen {
                     .bold(),
                 );
                 self.draw(title, lines, None)?;
-                if event::poll(Duration::ZERO)? && self.key()? == Some(KeyCode::Esc) {
-                    cancelled = true;
-                    progress.cancel();
+                if event::poll(Duration::ZERO)?
+                    && let Some(key) = self.read_key()?
+                {
+                    if key == KeyCode::Esc {
+                        cancelled = true;
+                        progress.cancel();
+                    } else {
+                        self.keys.push_back(key);
+                    }
                 }
                 deadline += FRAME;
                 match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
