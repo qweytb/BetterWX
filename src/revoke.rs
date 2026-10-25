@@ -32,7 +32,7 @@ const SUMMARY: &str = "kernel::service::SessionService::CoHandleMessageRevoke";
 const REFRESH: &str = "kernel::service::SessionService::CoHandleRevokedMessageOutOfDate";
 const TIME: &str = "revoketime\0";
 const POSITION: &str = "invalid string position\0";
-const PREFIX: &str = "已阻止";
+const PREFIX: &str = "已阻止 ";
 const FUNCTIONS: &[&str] = &[
     REVOKE, DELETE, SORT, ADD, UNREAD, SESSION, VIEW, SUMMARY, REFRESH,
 ];
@@ -600,6 +600,33 @@ fn notice(
         return Err("撤回提示内容更新对象与预期不同".into());
     }
     let setter = body[setter].near_branch_target();
+    let mut parsers = BTreeSet::new();
+    for (index, call) in body[..serialization].iter().enumerate() {
+        if call.code() != Code::Call_rel32_64 {
+            continue;
+        }
+        let Ok(receiver) = argument(&body, index, Register::RCX) else {
+            continue;
+        };
+        if receiver.mnemonic() != Mnemonic::Lea
+            || !Slot::from(&receiver).is_ok_and(|slot| slot == notice.tip)
+        {
+            continue;
+        }
+        let target = call.near_branch_target();
+        let Some(function) = image.function(target)? else {
+            continue;
+        };
+        let code = image.instructions(&function)?;
+        if calls(&code).count() == 1
+            && code.iter().any(|instruction| {
+                instruction.code() == Code::Jmp_rm64 && instruction.memory_base() != Register::RIP
+            })
+        {
+            parsers.insert(target);
+        }
+    }
+    let parser = unique(parsers.into_iter().collect(), "原生消息内容解析函数")?;
     let serialized = image.instructions(&serialized[&serializer])?;
     let field = unique(
         serialized
@@ -701,19 +728,19 @@ fn notice(
         }
     }
     let scratch = register(owners.last().ok_or("找不到撤回提示前的共享对象清理")?.1)?;
-    let range = start..body[index].ip();
+    let range = notice.range.start..body[index].ip();
     let states = image.exception_states(function.start)?;
-    if states
+    let entered = states
         .iter()
-        .rfind(|state| state.instruction <= range.start)
-        .is_none_or(|state| state.state != -1)
-    {
+        .rfind(|state| state.instruction <= start)
+        .ok_or("找不到提示清理时的异常状态")?;
+    if entered.state != -1 {
         return Err("无法识别提示清理时的异常状态".into());
     }
     let state = unique(
         states
             .iter()
-            .filter(|state| state.instruction > range.start && state.instruction <= range.end)
+            .filter(|state| state.instruction > start && state.instruction <= range.end)
             .collect(),
         "提示清理后的异常状态",
     )?;
@@ -728,21 +755,24 @@ fn notice(
         code.call(destroy)?;
     }
     let resumed = range.start + code.assemble(range.start)?.len() as u64;
-    code.cmp(dword_ptr(notice.tip.add(notice.local).memory()?), 0)?;
+    code.mov(edx, dword_ptr(notice.tip.add(notice.local).memory()?))?;
+    code.test(edx, edx)?;
     code.jne(range.end)?;
     code.mov(scratch, qword_ptr(source.memory()?))?;
     code.lea(rcx, ptr(scratch + field))?;
-    code.xor(edx, edx)?;
     code.xor(r8d, r8d)?;
     code.lea(r9, ptr(Register::RIP) + notice.prefix)?;
     code.mov(qword_ptr(rsp + 0x20), PREFIX.len() as i32)?;
     code.call(replacement)?;
     code.mov(rcx, scratch)?;
+    code.lea(scratch, notice.tip.memory()?)?;
     code.lea(rdx, output.memory()?)?;
     code.call(serializer)?;
-    code.lea(rcx, notice.tip.memory()?)?;
-    code.lea(rdx, output.memory()?)?;
+    code.mov(rcx, scratch)?;
+    code.mov(rdx, rax)?;
     code.call(setter)?;
+    code.mov(rcx, scratch)?;
+    code.call(parser)?;
     let size = code.assemble(range.start)?.len();
     let edit = patch(image, range.clone(), &mut code)?;
     let address = u32::try_from(resumed - image.base())?;
@@ -751,13 +781,21 @@ fn notice(
         range.start - image.base(),
         range.end - range.start,
     ));
-    Ok(vec![
+    let mut edits = vec![
         edit,
         Edit {
             range: state.offset..state.offset + 4,
             bytes: address.to_le_bytes().to_vec(),
         },
-    ])
+    ];
+    if entered.instruction > range.start {
+        let address = u32::try_from(range.start - image.base())?;
+        edits.push(Edit {
+            range: entered.offset..entered.offset + 4,
+            bytes: address.to_le_bytes().to_vec(),
+        });
+    }
+    Ok(edits)
 }
 
 fn replace(image: &Image<'_>, symbols: &Symbols, references: &References) -> Result<u64> {
