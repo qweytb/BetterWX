@@ -20,7 +20,7 @@ use crossterm::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    Result, feature, install,
+    Result, feature, inherit, install,
     progress::{FRAME, Progress, Step},
     store::{self, Content, Store},
 };
@@ -29,7 +29,7 @@ type Line = StyledContent<String>;
 
 enum Change<'a> {
     Feature(&'a feature::Prepared, Option<usize>),
-    Update(BTreeMap<PathBuf, Content>),
+    Update(BTreeMap<PathBuf, Content>, Option<&'a inherit::Source>),
     Restore,
 }
 
@@ -37,7 +37,7 @@ impl Change<'_> {
     fn targets(&self, store: &Store) -> Result<Vec<PathBuf>> {
         match self {
             Self::Feature(patch, mode) => patch.targets(store, *mode),
-            Self::Update(contents) => Ok(contents.keys().cloned().collect()),
+            Self::Update(contents, _) => Ok(contents.keys().cloned().collect()),
             Self::Restore => Ok(store.changed()),
         }
     }
@@ -690,8 +690,8 @@ fn apply(
             process.terminate(progress)?;
         }
     }
-    if let Change::Update(contents) = change {
-        return feature::update(store, contents, prepared, progress);
+    if let Change::Update(contents, inherited) = change {
+        return feature::update(store, contents, prepared, inherited, progress);
     }
     let step = progress.activity("准备文件内容");
     let contents = match &change {
@@ -709,7 +709,7 @@ fn apply(
             step.finish("恢复原始内容");
             contents
         }
-        Change::Update(_) => unreachable!(),
+        Change::Update(..) => unreachable!(),
     };
     feature::describe(store, &contents, prepared, progress)?;
     store.save(contents, progress)?;
@@ -1059,11 +1059,12 @@ fn icon(
 
 fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
     let detail = format!(" -- {}", version(path));
-    let Some((mut store, prepared)) = screen.work("分析", &detail, |progress| {
+    let Some((mut store, prepared, mut inherited)) = screen.work("分析", &detail, |progress| {
         let mut store = Store::open(path, progress)?;
         let prepared = feature::scan(&mut store, progress)?;
         feature::inspect(&mut store, &prepared, progress)?;
-        Ok((store, prepared))
+        let inherited = inherit::find(&store, progress)?;
+        Ok((store, prepared, inherited))
     })?
     else {
         return Ok(());
@@ -1072,7 +1073,7 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
         .iter()
         .filter(|patch| patch.feature.id != crate::tray::FEATURE.id)
         .collect();
-    let mut selected = 0;
+    let mut selected: usize = 0;
     let mut notice = store
         .files
         .values()
@@ -1081,7 +1082,13 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
         .join("\n");
     let mut pending = None;
     loop {
-        let outdated = store.files.values().any(|file| file.issue.is_some());
+        if inherited.is_some() && store.files[&store.target].backed_up()? {
+            inherited = None;
+            if store.files.values().all(|file| file.issue.is_none()) {
+                selected = selected.saturating_sub(1);
+            }
+        }
+        let outdated = inherited.is_some() || store.files.values().any(|file| file.issue.is_some());
         let offset = usize::from(outdated);
         let mut items: Vec<Item> = menu
             .iter()
@@ -1123,6 +1130,13 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                 .filter_map(|file| file.issue.as_deref())
                 .collect::<Vec<_>>()
                 .join("\n");
+            if let Some(source) = &inherited {
+                update.detail = if update.detail.is_empty() {
+                    source.detail.clone()
+                } else {
+                    format!("{}\n{}", source.detail, update.detail)
+                };
+            }
             if pending == Some(menu.len() + 1) {
                 update.value = occupied("更新");
             }
@@ -1166,9 +1180,9 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                 continue;
             }
             match screen.work("准备更新", &detail, |progress| {
-                feature::rebuild(&store, &prepared, progress)
+                feature::rebuild(&store, &prepared, inherited.as_ref(), progress)
             }) {
-                Ok(Some(contents)) => Change::Update(contents),
+                Ok(Some(contents)) => Change::Update(contents, inherited.as_ref()),
                 Ok(None) => return Ok(()),
                 Err(error) => {
                     notice = error.to_string();
@@ -1214,7 +1228,8 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
             screen.change(&mut store, &prepared, change, pending == Some(index))?;
         pending = retry.then_some(index);
         notice = message;
-        if outdated && store.files.values().all(|file| file.issue.is_none()) {
+        if outdated && inherited.is_none() && store.files.values().all(|file| file.issue.is_none())
+        {
             selected = selected.saturating_sub(1);
         }
         if screen.exiting {

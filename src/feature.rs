@@ -7,7 +7,7 @@ use std::{
 use crate::{
     Result, appex, browser, coexist, credentials, emoticon, icon,
     image::{Image, References, Symbols},
-    login, notify,
+    inherit, login, notify,
     progress::Progress,
     remote, resources, revoke, sound,
     store::{self, Content, Store},
@@ -237,6 +237,15 @@ pub fn analyze(
     features: &'static [Feature],
     progress: &Progress,
 ) -> Result<Vec<Prepared>> {
+    prepare(store, features, progress, |_| true)
+}
+
+pub fn prepare(
+    store: &mut Store,
+    features: &'static [Feature],
+    progress: &Progress,
+    selected: impl Fn(&Path) -> bool,
+) -> Result<Vec<Prepared>> {
     let mut prepared: Vec<_> = features
         .iter()
         .map(|feature| Prepared {
@@ -250,6 +259,9 @@ pub fn analyze(
         for target in feature.targets {
             progress.check()?;
             let path = target.path(&store.target)?;
+            if !selected(&path) {
+                continue;
+            }
             match store.load(&path, progress) {
                 Ok(file) => files
                     .entry(file.target.clone())
@@ -576,15 +588,29 @@ fn initialize(store: &Store, patch: &Prepared, progress: &Progress) -> Result<()
 pub fn rebuild(
     store: &Store,
     prepared: &[Prepared],
+    inherited: Option<&inherit::Source>,
     progress: &Progress,
 ) -> Result<BTreeMap<PathBuf, Content>> {
     sources(store, store.files.keys())?;
     let mut enabled = Vec::new();
     for patch in prepared {
-        let mode = match patch.state(store) {
-            State::Disabled => continue,
-            State::Enabled(mode) => mode,
-            State::Partial => 0,
+        let mode = if let Some(source) = inherited {
+            let Some(mode) = source.modes.get(patch.feature.id) else {
+                continue;
+            };
+            patch
+                .edits
+                .as_ref()
+                .map_err(|error| format!("{}：{error}", patch.feature.name))?
+                .iter()
+                .position(|choice| choice.id == *mode)
+                .ok_or_else(|| format!("{} 找不到模式：{mode}", patch.feature.name))?
+        } else {
+            match patch.state(store) {
+                State::Disabled => continue,
+                State::Enabled(mode) => mode,
+                State::Partial => 0,
+            }
         };
         enabled.push((patch, mode));
     }
@@ -618,9 +644,13 @@ pub fn update(
     store: &mut Store,
     contents: BTreeMap<PathBuf, Content>,
     prepared: &[Prepared],
+    inherited: Option<&inherit::Source>,
     progress: &Progress,
 ) -> Result<()> {
     sources(store, contents.keys())?;
+    if let Some(source) = inherited {
+        source.copy(store, &contents, progress)?;
+    }
     for patch in prepared {
         if contents
             .values()

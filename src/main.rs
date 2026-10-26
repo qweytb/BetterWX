@@ -7,6 +7,7 @@ mod emoticon;
 mod feature;
 mod icon;
 mod image;
+mod inherit;
 mod install;
 mod instance;
 mod login;
@@ -178,6 +179,11 @@ fn run() -> Result<()> {
         store.load_backups(&feature::targets(&store.target)?, &progress)?;
     }
     println!("目标：{}", store::display(&store.target));
+    let inherited = if matches!(command, "status" | "update") {
+        inherit::find(&store, &progress)?
+    } else {
+        None
+    };
     if force {
         for file in store.files.values_mut() {
             file.confirmed = true;
@@ -200,8 +206,11 @@ fn run() -> Result<()> {
                 .values()
                 .filter_map(|file| file.issue.as_ref())
                 .collect::<Vec<_>>();
-            if !issues.is_empty() {
+            if !issues.is_empty() || inherited.is_some() {
                 println!("更新补丁：");
+                if let Some(source) = &inherited {
+                    println!("{}", source.detail);
+                }
                 for issue in issues {
                     println!("  {issue}");
                 }
@@ -306,9 +315,15 @@ fn run() -> Result<()> {
             println!("{}：{}", feature.name, patch.label(requested));
         }
         "update" => {
-            let contents = feature::rebuild(&store, &prepared, &progress)?;
+            let contents = feature::rebuild(&store, &prepared, inherited.as_ref(), &progress)?;
             let changed = !contents.is_empty();
-            feature::update(&mut store, contents, &prepared, &progress)?;
+            feature::update(
+                &mut store,
+                contents,
+                &prepared,
+                inherited.as_ref(),
+                &progress,
+            )?;
             println!(
                 "{}",
                 if changed {

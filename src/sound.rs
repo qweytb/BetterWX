@@ -279,7 +279,7 @@ fn header(size: usize) -> Result<[u8; 44]> {
     Ok(bytes)
 }
 
-fn validate(data: &[u8]) -> Result<()> {
+pub fn validate(data: &[u8]) -> Result<()> {
     let size = data.len().checked_sub(44).ok_or("WAV 文件头不完整")?;
     if !size.is_multiple_of(4) || data[..44] != header(size)? {
         return Err("音频需要 44.1 kHz、双声道、16 位 PCM 和标准 WAV 文件头".into());

@@ -281,7 +281,7 @@ fn decode(_data: Vec<u8>, _progress: &Progress) -> Result<Vec<u8>> {
 }
 
 #[cfg(windows)]
-fn validate(data: &[u8], progress: &Progress) -> Result<()> {
+pub fn validate(data: &[u8], progress: &Progress) -> Result<()> {
     use std::ptr::null;
 
     use windows::Win32::{
@@ -313,6 +313,6 @@ fn validate(data: &[u8], progress: &Progress) -> Result<()> {
 }
 
 #[cfg(not(windows))]
-fn validate(_data: &[u8], _progress: &Progress) -> Result<()> {
+pub fn validate(_data: &[u8], _progress: &Progress) -> Result<()> {
     Err("图片读取需要 Windows".into())
 }

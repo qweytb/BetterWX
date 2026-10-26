@@ -26,10 +26,14 @@ fn directory() -> Result<Option<PathBuf>> {
 }
 
 pub fn scan() -> Result<Vec<PathBuf>> {
-    let mut versions = Vec::new();
     let Some(directory) = directory()? else {
         return Ok(Vec::new());
     };
+    versions(&directory)
+}
+
+fn versions(directory: &Path) -> Result<Vec<PathBuf>> {
+    let mut versions = Vec::new();
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -50,6 +54,29 @@ pub fn scan() -> Result<Vec<PathBuf>> {
     }
     versions.sort_by(|left, right| right.0.cmp(&left.0));
     Ok(versions.into_iter().map(|(_, file)| file).collect())
+}
+
+pub fn previous(target: &Path) -> Result<Option<PathBuf>> {
+    let Some(directory) = target.parent().and_then(Path::parent) else {
+        return Ok(None);
+    };
+    let launcher = directory.join("Weixin.exe");
+    if !launcher.is_file() {
+        return Ok(None);
+    }
+    if directory.join(version(&launcher)?).join("Weixin.dll") != target {
+        return Ok(None);
+    }
+    let versions = versions(directory)?;
+    let Some(current) = versions.iter().position(|file| file == target) else {
+        return Ok(None);
+    };
+    for file in &versions[current + 1..] {
+        if file.with_added_extension("bak").try_exists()? {
+            return Ok(Some(file.clone()));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(windows)]

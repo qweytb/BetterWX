@@ -253,6 +253,10 @@ impl Store {
 }
 
 impl File {
+    pub fn backed_up(&self) -> Result<bool> {
+        Ok(self.backup.try_exists()?)
+    }
+
     fn open(target: &Path, backup: PathBuf, progress: &Progress) -> Result<Self> {
         let current = Arc::new(read(target, progress, "载入文件")?);
         let mut source_issue = None;
