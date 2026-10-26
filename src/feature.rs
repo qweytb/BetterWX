@@ -136,6 +136,36 @@ impl Prepared {
         }
     }
 
+    pub fn outdated(&self, store: &Store) -> bool {
+        let Ok(modes) = &self.edits else {
+            return false;
+        };
+        store.files.iter().any(|(target, file)| {
+            let Some(mode) = file.enabled.get(self.feature.id) else {
+                return false;
+            };
+            modes[*mode].edits.get(target).is_some_and(|edits| {
+                edits.iter().any(|edit| {
+                    file.current
+                        .get(edit.range.start..edit.range.start + edit.bytes.len())
+                        != Some(edit.bytes.as_slice())
+                })
+            })
+        })
+    }
+
+    pub fn status(&self, store: &Store) -> String {
+        if let Err(error) = &self.edits {
+            return format!("不可用：{error}");
+        }
+        let label = self.label(self.state(store));
+        if self.outdated(store) {
+            format!("{label}，待更新")
+        } else {
+            label.to_owned()
+        }
+    }
+
     pub fn next(&self, store: &Store) -> Option<usize> {
         match self.state(store) {
             State::Enabled(mode) if mode + 1 == self.edits.as_ref().expect("modes").len() => None,
@@ -459,7 +489,7 @@ pub fn inspect(store: &mut Store, prepared: &[Prepared], progress: &Progress) ->
         let difference = difference.or_else(|| (offset != file.current.len()).then_some(offset));
         file.issue = difference.map(|offset| {
             format!(
-                "{} 的位置 {offset:#x} 存在未识别的改动",
+                "{} 与当前补丁内容不同，首处差异位于 {offset:#x}",
                 store::display(target)
             )
         });

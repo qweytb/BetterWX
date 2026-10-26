@@ -193,15 +193,18 @@ fn run() -> Result<()> {
                 println!("{issue}");
             }
             for patch in &prepared {
-                println!(
-                    "{}：{}",
-                    patch.feature.name,
-                    if let Some(error) = patch.issue(&store) {
-                        error.as_str()
-                    } else {
-                        patch.label(patch.state(&store))
-                    },
-                );
+                println!("{}：{}", patch.feature.name, patch.status(&store));
+            }
+            let issues = store
+                .files
+                .values()
+                .filter_map(|file| file.issue.as_ref())
+                .collect::<Vec<_>>();
+            if !issues.is_empty() {
+                println!("更新补丁：");
+                for issue in issues {
+                    println!("  {issue}");
+                }
             }
         }
         "sound" => {

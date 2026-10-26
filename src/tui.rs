@@ -59,6 +59,33 @@ impl Item {
             detail: String::new(),
         }
     }
+
+    fn feature(patch: &feature::Prepared, store: &Store, label: &str) -> Self {
+        let error = patch.edits.as_ref().err();
+        let label = label.to_owned();
+        Self {
+            marker: if patch.state(store).enabled() {
+                "■"
+            } else {
+                "□"
+            },
+            label: if error.is_some() {
+                label.red()
+            } else if patch.outdated(store) {
+                label.dark_green()
+            } else {
+                style(label)
+            },
+            value: if error.is_some() {
+                "不可用".to_owned()
+            } else {
+                patch.status(store)
+            },
+            detail: error
+                .cloned()
+                .unwrap_or_else(|| patch.feature.description.to_owned()),
+        }
+    }
 }
 
 struct Screen {
@@ -713,27 +740,12 @@ fn coexist(
     loop {
         let state = patch.state(store);
         let enabled = state.enabled();
-        let error = patch.issue(store);
-        let mut items = vec![Item {
-            marker: if enabled { "■" } else { "□" },
-            label: if error.is_some() {
-                "共存支持".to_owned().red()
-            } else if pending {
-                "共存支持".to_owned().dark_green()
-            } else {
-                style("共存支持".to_owned())
-            },
-            value: if pending {
-                occupied(if enabled { "关闭" } else { "开启" })
-            } else if error.is_some() {
-                "不可用".to_owned()
-            } else {
-                patch.label(state).to_owned()
-            },
-            detail: error
-                .cloned()
-                .unwrap_or_else(|| patch.feature.description.to_owned()),
-        }];
+        let mut support = Item::feature(patch, store, "共存支持");
+        if pending {
+            support.label = support.label.dark_green();
+            support.value = occupied(if enabled { "关闭" } else { "开启" });
+        }
+        let mut items = vec![support];
         if enabled {
             for letter in (b'A'..=b'Z').map(char::from) {
                 let path = directory.join(letter.to_string());
@@ -890,27 +902,15 @@ fn sounds(
     loop {
         let state = patch.state(store);
         let enabled = state.enabled();
-        let error = patch.issue(store);
-        let mut items = vec![Item {
-            marker: if enabled { "■" } else { "□" },
-            label: if error.is_some() {
-                "外置提示音支持".to_owned().red()
-            } else if pending {
-                "外置提示音支持".to_owned().dark_green()
-            } else {
-                style("外置提示音支持".to_owned())
-            },
-            value: if pending {
-                occupied(if enabled { "关闭" } else { "开启" })
-            } else if error.is_some() {
-                "不可用".to_owned()
-            } else {
-                patch.label(state).to_owned()
-            },
-            detail: error
-                .cloned()
-                .unwrap_or_else(|| "启用后可以编辑外置提示音".to_owned()),
-        }];
+        let mut support = Item::feature(patch, store, "外置提示音支持");
+        if patch.edits.is_ok() {
+            support.detail = "启用后可以编辑外置提示音".to_owned();
+        }
+        if pending {
+            support.label = support.label.dark_green();
+            support.value = occupied(if enabled { "关闭" } else { "开启" });
+        }
+        let mut items = vec![support];
         if enabled {
             for sound in crate::sound::SOUNDS {
                 let mut item = Item::action(style(sound.name));
@@ -981,33 +981,17 @@ fn icon(
             .map(|(index, patch)| {
                 let state = patch.state(store);
                 let enabled = state.enabled();
-                let error = patch.issue(store);
                 let label = if index == 0 {
                     patch.feature.name
                 } else {
                     "外置图标支持"
+                };
+                let mut item = Item::feature(patch, store, label);
+                if pending == Some(index) {
+                    item.label = item.label.dark_green();
+                    item.value = occupied(if enabled { "关闭" } else { "开启" });
                 }
-                .to_owned();
-                Item {
-                    marker: if enabled { "■" } else { "□" },
-                    label: if error.is_some() {
-                        label.red()
-                    } else if pending == Some(index) {
-                        label.dark_green()
-                    } else {
-                        style(label)
-                    },
-                    value: if pending == Some(index) {
-                        occupied(if enabled { "关闭" } else { "开启" })
-                    } else if error.is_some() {
-                        "不可用".to_owned()
-                    } else {
-                        patch.label(state).to_owned()
-                    },
-                    detail: error
-                        .cloned()
-                        .unwrap_or_else(|| patch.feature.description.to_owned()),
-                }
+                item
             })
             .collect();
         if enabled {
@@ -1115,11 +1099,9 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                     item.detail = patch.feature.description.to_owned();
                     return item;
                 }
-                let error = patch.issue(&store);
-                let state = patch.state(&store);
                 let multiple = patch.edits.as_ref().is_ok_and(|modes| modes.len() > 1);
-                let label = patch.feature.name.to_owned();
-                let value = if pending == Some(index) {
+                let mut item = Item::feature(patch, &store, patch.feature.name);
+                if pending == Some(index) {
                     let action = match patch.next(&store) {
                         None => "关闭".to_owned(),
                         Some(mode) if multiple => {
@@ -1127,37 +1109,20 @@ fn configure(screen: &mut Screen, path: &Path) -> Result<()> {
                         }
                         Some(_) => "开启".to_owned(),
                     };
-                    occupied(&action)
-                } else {
-                    if error.is_some() {
-                        "不可用"
-                    } else {
-                        patch.label(state)
-                    }
-                    .to_owned()
-                };
-                Item {
-                    marker: if error.is_none() && state.enabled() {
-                        "■"
-                    } else {
-                        "□"
-                    },
-                    label: if error.is_some() {
-                        label.red()
-                    } else if pending == Some(index) {
-                        label.dark_green()
-                    } else {
-                        style(label)
-                    },
-                    value,
-                    detail: error
-                        .cloned()
-                        .unwrap_or_else(|| patch.feature.description.to_owned()),
+                    item.label = item.label.dark_green();
+                    item.value = occupied(&action);
                 }
+                item
             })
             .collect();
         if outdated {
             let mut update = Item::action("更新补丁".dark_green());
+            update.detail = store
+                .files
+                .values()
+                .filter_map(|file| file.issue.as_deref())
+                .collect::<Vec<_>>()
+                .join("\n");
             if pending == Some(menu.len() + 1) {
                 update.value = occupied("更新");
             }
