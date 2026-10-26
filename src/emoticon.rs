@@ -83,6 +83,7 @@ struct Native {
     path_destroy: u64,
     string_destroy: u64,
     shared_destroy: u64,
+    shared_move: u64,
     set_destroy: u64,
     data_destroy: u64,
     utf8: u64,
@@ -219,6 +220,81 @@ fn callers(references: &References, address: u64) -> Vec<Range<u64>> {
         .collect::<BTreeMap<_, _>>()
         .into_values()
         .collect()
+}
+
+fn transfer(image: &Image<'_>, progress: &Progress) -> Result<u64> {
+    let mut found = Vec::new();
+    for function in image.functions()? {
+        progress.check()?;
+        let bytes = image.data(function.start, (function.end - function.start) as usize)?;
+        let mut prefix = Decoder::with_ip(64, bytes, function.start, DecoderOptions::NONE)
+            .into_iter()
+            .take_while(|instruction| instruction.mnemonic() != Mnemonic::Call);
+        let Some(value) = prefix.find(|instruction| {
+            instruction.code() == Code::Movups_xmm_xmmm128
+                && instruction.memory_base() == Register::RDX
+                && instruction.memory_index() == Register::None
+                && instruction.memory_displacement64() == 0
+        }) else {
+            continue;
+        };
+        let Some(zero) = prefix.find(|instruction| {
+            instruction.mnemonic() == Mnemonic::Xorps
+                && instruction.op0_register() == instruction.op1_register()
+                && instruction.op0_register() != value.op0_register()
+        }) else {
+            continue;
+        };
+        if !prefix.any(|instruction| {
+            instruction.code() == Code::Movups_xmmm128_xmm
+                && instruction.memory_base() == Register::RDX
+                && instruction.memory_index() == Register::None
+                && instruction.memory_displacement64() == 0
+                && instruction.op1_register() == zero.op0_register()
+        }) {
+            continue;
+        }
+        let Some(owner) = prefix.find(|instruction| {
+            instruction.code() == Code::Mov_r64_rm64
+                && instruction.memory_base() == Register::RCX
+                && instruction.memory_index() == Register::None
+                && instruction.memory_displacement64() == 8
+        }) else {
+            continue;
+        };
+        if !prefix.any(|instruction| {
+            instruction.code() == Code::Movups_xmmm128_xmm
+                && instruction.memory_base() == Register::RCX
+                && instruction.memory_index() == Register::None
+                && instruction.memory_displacement64() == 0
+                && instruction.op1_register() == value.op0_register()
+        }) {
+            continue;
+        }
+        let body = image.instructions(&function)?;
+        if calls(&body).next().is_some()
+            || body.iter().any(|instruction| {
+                instruction.op0_kind() == OpKind::Memory
+                    && instruction.memory_base() == Register::RCX
+                    && instruction.memory_displacement64() != 0
+            })
+        {
+            continue;
+        }
+        let counters = body
+            .iter()
+            .filter(|instruction| {
+                instruction.code() == Code::Dec_rm32
+                    && instruction.has_lock_prefix()
+                    && instruction.memory_base() == owner.op0_register()
+            })
+            .map(Instruction::memory_displacement64)
+            .collect::<Vec<_>>();
+        if counters == [8, 12] {
+            found.push(function.start);
+        }
+    }
+    unique(found, "共享对象移动赋值")
 }
 
 fn cleanup(image: &Image<'_>, range: &Range<u64>, state: i32) -> Result<Vec<Instruction>> {
@@ -747,6 +823,7 @@ impl Native {
             path_destroy,
             string_destroy,
             shared_destroy,
+            shared_move: transfer(image, progress)?,
             set_destroy,
             data_destroy,
             utf8,
@@ -1767,22 +1844,22 @@ fn preview(image: &Image<'_>, native: &Native, references: &References) -> Resul
         let Ok(function) = function(image, target) else {
             continue;
         };
-        if image
-            .instructions(&function)?
-            .iter()
-            .take_while(|instruction| instruction.mnemonic() != Mnemonic::Call)
-            .any(|instruction| {
-                instruction.code() == Code::Mov_rm32_r32
-                    && instruction.op0_kind() == OpKind::Memory
-                    && instruction.memory_base() == Register::RCX
-                    && instruction.memory_displacement64() == 0xc8
-                    && instruction.op1_register() == Register::EDX
-            })
-        {
-            types.push((index, target));
-        }
+        types.extend(
+            image
+                .instructions(&function)?
+                .iter()
+                .take_while(|instruction| instruction.mnemonic() != Mnemonic::Call)
+                .filter_map(|instruction| {
+                    (instruction.code() == Code::Mov_rm32_r32
+                        && instruction.op0_kind() == OpKind::Memory
+                        && instruction.memory_base() == Register::RCX
+                        && instruction.memory_index() == Register::None
+                        && instruction.op1_register() == Register::EDX)
+                        .then_some((index, target, instruction.memory_displacement64() as i64))
+                }),
+        );
     }
-    let (type_call, type_setter) = unique(types, "预览项目类型设置")?;
+    let (type_call, type_setter, kind) = unique(types, "预览项目类型设置")?;
     let mut setters = BTreeSet::new();
     for caller in callers(references, type_setter) {
         let instructions = image.instructions(&caller)?;
@@ -1800,24 +1877,48 @@ fn preview(image: &Image<'_>, native: &Native, references: &References) -> Resul
                 continue;
             };
             let setter = image.instructions(&function)?;
-            if setter.iter().any(|instruction| {
-                instruction.code() == Code::Mov_rm64_r64
-                    && instruction.op0_kind() == OpKind::Memory
-                    && instruction.memory_displacement64() == 0x230
-            }) && setter
+            if calls(&setter).next().is_some()
+                || !setter
+                    .iter()
+                    .take_while(|instruction| instruction.mnemonic() != Mnemonic::Call)
+                    .any(|instruction| {
+                        instruction.code() == Code::Mov_r64_rm64
+                            && instruction.memory_base() == Register::RDX
+                            && instruction.memory_displacement64() == 8
+                    })
+            {
+                continue;
+            }
+            let Some(receiver) = setter
                 .iter()
                 .take_while(|instruction| instruction.mnemonic() != Mnemonic::Call)
-                .any(|instruction| {
-                    instruction.code() == Code::Mov_r64_rm64
-                        && instruction.memory_base() == Register::RDX
-                        && instruction.memory_displacement64() == 8
+                .find(|instruction| {
+                    instruction.mnemonic() == Mnemonic::Mov
+                        && instruction.op0_kind() == OpKind::Register
+                        && instruction.op1_kind() == OpKind::Register
+                        && instruction.op1_register() == Register::RCX
                 })
+            else {
+                continue;
+            };
+            let fields = setter
+                .iter()
+                .filter_map(|instruction| {
+                    (instruction.code() == Code::Mov_rm64_r64
+                        && instruction.op0_kind() == OpKind::Memory
+                        && instruction.memory_base() == receiver.op0_register()
+                        && instruction.memory_index() == Register::None)
+                        .then_some(instruction.memory_displacement64() as i64)
+                })
+                .collect::<Vec<_>>();
+            if let [value, owner] = fields.as_slice()
+                && *owner == value + 8
             {
-                setters.insert(target);
+                setters.insert((target, *value));
             }
         }
     }
-    let setter = unique(setters.into_iter().collect(), "预览表情信息设置")?;
+    let (_, information) = unique(setters.into_iter().collect(), "预览表情信息设置")?;
     let constructor = call(&body, native.loader)?;
     let (binding, _) = calls(&body[constructor + 1..])
         .next()
@@ -1844,16 +1945,14 @@ fn preview(image: &Image<'_>, native: &Native, references: &References) -> Resul
     output.replace(type_call..type_call + 1, &mut code)?;
     let mut code = CodeAssembler::new(64)?;
     let mut original = code.create_label();
-    compare(&mut code, dword_ptr(r14))?;
+    code.cmp(dword_ptr(r12 + kind), 3)?;
     code.jne(original)?;
     code.lea(rcx, ptr(rbp + parameter))?;
     code.mov(rdx, r14)?;
     code.call(native.info)?;
-    code.mov(rcx, r12)?;
+    code.lea(rcx, ptr(r12 + information))?;
     code.lea(rdx, ptr(rbp + parameter))?;
-    code.call(setter)?;
-    code.lea(rcx, ptr(rbp + parameter))?;
-    code.call(native.shared_destroy)?;
+    code.call(native.shared_move)?;
     code.mov(rax, r12)?;
     code.jmp(body[binding].next_ip())?;
     code.set_label(&mut original)?;

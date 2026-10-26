@@ -684,7 +684,7 @@ impl<'a> Image<'a> {
         Ok(function.contains(&address).then_some(function))
     }
 
-    fn functions(&self) -> Result<Vec<Range<u64>>> {
+    pub fn functions(&self) -> Result<Vec<Range<u64>>> {
         let mut functions = Vec::new();
         for entry in self.unwind()? {
             let start = u32::from_le_bytes(entry[..4].try_into()?) as u64;
