@@ -16,7 +16,7 @@ use object::read::pe::{Import, PeFile64};
 use object::read::{ExportTarget, NameOrOrdinal, Object, ObjectSection};
 use rustc_hash::FxHashMap;
 
-use crate::{Result, feature::Edit, progress::Progress, xlog::Records};
+use crate::{Result, data::Data, feature::Edit, progress::Progress, xlog::Records};
 
 pub type Symbols = BTreeMap<String, Vec<u64>>;
 
@@ -262,7 +262,7 @@ impl<'a> Image<'a> {
             .ok_or_else(|| format!("文件位置 {offset:#x} 没有对应的地址").into())
     }
 
-    pub fn difference(&self, range: &Range<usize>, before: &[u8], after: &[u8]) -> Result<String> {
+    pub fn difference(&self, range: &Range<usize>, before: &Data, after: &Data) -> Result<String> {
         let address = self.address(range.start).ok();
         let mut start = address;
         let mut values = Vec::new();
@@ -273,9 +273,11 @@ impl<'a> Image<'a> {
             {
                 let offset = self.offset(function.start)?;
                 let end = offset + (function.end - function.start) as usize;
-                let bytes = &data[offset.min(data.len())..end.min(data.len())];
+                let bytes = data
+                    .get(offset.min(data.len())..end.min(data.len()))
+                    .expect("function content range");
                 let mut instructions =
-                    Decoder::with_ip(64, bytes, function.start, DecoderOptions::NONE)
+                    Decoder::with_ip(64, &bytes, function.start, DecoderOptions::NONE)
                         .into_iter()
                         .take_while(|instruction| instruction.ip() < address + range.len() as u64)
                         .filter(|instruction| instruction.next_ip() > address)
@@ -287,7 +289,8 @@ impl<'a> Image<'a> {
             } else {
                 values.push(format!(
                     "{:02X?}",
-                    &data[range.start.min(data.len())..range.end.min(data.len())]
+                    data.get(range.start.min(data.len())..range.end.min(data.len()))
+                        .expect("content range")
                 ));
             }
         }

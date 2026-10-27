@@ -2,10 +2,13 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Range,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use crate::{
-    Result, appex, browser, coexist, credentials, emoticon, icon,
+    Result, appex, browser, coexist, credentials,
+    data::Data,
+    emoticon, icon,
     image::{Image, References, Symbols},
     inherit, login, notify,
     progress::Progress,
@@ -145,11 +148,9 @@ impl Prepared {
                 return false;
             };
             modes[*mode].edits.get(target).is_some_and(|edits| {
-                edits.iter().any(|edit| {
-                    file.current
-                        .get(edit.range.start..edit.range.start + edit.bytes.len())
-                        != Some(edit.bytes.as_slice())
-                })
+                edits
+                    .iter()
+                    .any(|edit| file.current.matches(edit.range.start, &edit.bytes) != Some(true))
             })
         })
     }
@@ -401,7 +402,7 @@ pub fn prepare(
 
 fn recognize<'a>(
     original: &[u8],
-    current: &[u8],
+    current: &Data,
     modes: impl Iterator<Item = (usize, &'a [Edit])>,
 ) -> Option<usize> {
     let mut touched = false;
@@ -411,13 +412,10 @@ fn recognize<'a>(
         let mut applied = !edits.is_empty();
         for edit in edits {
             let before = original.get(edit.range.clone());
-            let after = current.get(edit.range.start..edit.range.start + edit.bytes.len());
-            let equal = after == Some(edit.bytes.as_slice());
+            let equal = current.matches(edit.range.start, &edit.bytes) == Some(true);
             applied &= equal;
-            touched |= current
-                .get(edit.range.clone())
-                .zip(before)
-                .is_some_and(|(current, original)| current != original);
+            touched |= before
+                .is_some_and(|original| current.matches(edit.range.start, original) == Some(false));
             if equal && before != Some(edit.bytes.as_slice()) {
                 matched += 1;
             }
@@ -463,42 +461,8 @@ pub fn inspect(store: &mut Store, prepared: &[Prepared], progress: &Progress) ->
                 enabled.insert(patch.feature.id.to_owned(), mode);
             }
         }
-        let mut expected = Vec::new();
-        let mut position = 0;
-        for edit in edits(&enabled, prepared, target)? {
-            expected.push(&file.original[position..edit.range.start]);
-            expected.push(edit.bytes.as_slice());
-            position = edit.range.end;
-        }
-        expected.push(&file.original[position..]);
-        let mut offset = 0;
-        let difference = expected
-            .into_iter()
-            .flat_map(|bytes| bytes.chunks(1024 * 1024))
-            .find_map(|expected| {
-                let end = (offset + expected.len()).min(file.current.len());
-                let current = &file.current[offset..end];
-                let difference = if expected == current {
-                    None
-                } else {
-                    expected
-                        .iter()
-                        .zip(current)
-                        .position(|(left, right)| left != right)
-                        .or_else(|| (expected.len() != current.len()).then_some(current.len()))
-                };
-                let start = offset;
-                offset = end;
-                step.set(offset as u64);
-                if step.sample() {
-                    step.detail(format!(
-                        "{name}；offset 0x{start:08X}；{} 字节",
-                        current.len()
-                    ));
-                }
-                difference.map(|index| start + index)
-            });
-        let difference = difference.or_else(|| (offset != file.current.len()).then_some(offset));
+        let expected = generate(&file.original, &enabled, prepared, target)?;
+        let difference = expected.difference(&file.current);
         file.issue = difference.map(|offset| {
             format!(
                 "{} 与当前补丁内容不同，首处差异位于 {offset:#x}",
@@ -627,7 +591,7 @@ pub fn rebuild(
             .map(|(patch, mode)| (patch.feature.id.to_owned(), *mode))
             .collect();
         let data = generate(&file.original, &selected, prepared, target)?;
-        if file.current.as_slice() != data {
+        if file.current != data {
             contents.insert(
                 target.clone(),
                 Content {
@@ -694,10 +658,20 @@ pub fn describe(
             let mut size = 0;
             for edit in edits {
                 progress.check()?;
-                let before = &file.current[edit.range.start.min(file.current.len())
-                    ..edit.range.end.min(file.current.len())];
-                let after = &content.data[edit.range.start.min(content.data.len())
-                    ..edit.range.end.min(content.data.len())];
+                let before = file
+                    .current
+                    .get(
+                        edit.range.start.min(file.current.len())
+                            ..edit.range.end.min(file.current.len()),
+                    )
+                    .expect("current content range");
+                let after = content
+                    .data
+                    .get(
+                        edit.range.start.min(content.data.len())
+                            ..edit.range.end.min(content.data.len()),
+                    )
+                    .expect("updated content range");
                 if before != after {
                     step.record(format!(
                         "{name}；{}",
@@ -705,7 +679,7 @@ pub fn describe(
                     ));
                     size += before
                         .iter()
-                        .zip(after)
+                        .zip(after.iter())
                         .filter(|(left, right)| left != right)
                         .count()
                         + before.len().abs_diff(after.len());
@@ -750,15 +724,23 @@ fn edits<'a>(
 }
 
 fn generate(
-    original: &[u8],
+    original: &Arc<Vec<u8>>,
     enabled: &BTreeMap<String, usize>,
     prepared: &[Prepared],
     target: &Path,
-) -> Result<Vec<u8>> {
+) -> Result<Data> {
     let edits = edits(enabled, prepared, target)?;
-    let mut output = original.to_vec();
-    for edit in edits.into_iter().rev() {
-        output.splice(edit.range.clone(), edit.bytes.iter().copied());
+    let mut output = Data::default();
+    let mut position = 0;
+    for edit in edits {
+        output.push(original.clone(), position..edit.range.start);
+        if original.get(edit.range.clone()) == Some(edit.bytes.as_slice()) {
+            output.push(original.clone(), edit.range.clone());
+        } else {
+            output.push(Arc::new(edit.bytes.clone()), 0..edit.bytes.len());
+        }
+        position = edit.range.end;
     }
+    output.push(original.clone(), position..original.len());
     Ok(output)
 }

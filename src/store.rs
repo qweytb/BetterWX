@@ -1,14 +1,14 @@
 use std::{
     collections::{BTreeMap, btree_map::Entry},
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::{BufWriter, Read, Write},
     path::{Component, Path, PathBuf, Prefix},
     sync::Arc,
 };
 
 use tempfile::NamedTempFile;
 
-use crate::{Result, install, progress::Progress};
+use crate::{Result, data::Data, install, progress::Progress};
 
 pub struct Store {
     pub target: PathBuf,
@@ -18,7 +18,7 @@ pub struct Store {
 pub struct File {
     pub target: PathBuf,
     backup: PathBuf,
-    pub current: Arc<Vec<u8>>,
+    pub current: Data,
     pub original: Arc<Vec<u8>>,
     pub enabled: BTreeMap<String, usize>,
     pub issue: Option<String>,
@@ -27,7 +27,7 @@ pub struct File {
 }
 
 pub struct Content {
-    pub data: Vec<u8>,
+    pub data: Data,
     pub enabled: BTreeMap<String, usize>,
 }
 
@@ -64,22 +64,37 @@ fn read(path: &Path, progress: &Progress, name: &str) -> Result<Vec<u8>> {
 }
 
 pub fn write(path: &Path, data: &[u8], progress: &Progress) -> Result<()> {
+    write_parts(path, data.len(), [data], progress)
+}
+
+fn write_parts<'a>(
+    path: &Path,
+    size: usize,
+    parts: impl IntoIterator<Item = &'a [u8]>,
+    progress: &Progress,
+) -> Result<()> {
     let parent = path.parent().ok_or("目标文件缺少父目录")?;
     let mut temporary = NamedTempFile::new_in(parent)?;
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let step = progress.start("写入文件", data.len() as u64, "字节");
+    let step = progress.start("写入文件", size as u64, "字节");
     step.detail(name.as_ref());
     let mut completed = 0;
-    for chunk in data.chunks(1024 * 1024) {
-        progress.check()?;
-        temporary.write_all(chunk)?;
-        completed += chunk.len();
-        step.set(completed as u64);
+    {
+        let mut output = BufWriter::with_capacity(1024 * 1024, temporary.as_file_mut());
+        for part in parts {
+            for chunk in part.chunks(1024 * 1024) {
+                progress.check()?;
+                output.write_all(chunk)?;
+                completed += chunk.len();
+                step.set(completed as u64);
+            }
+        }
+        output.flush()?;
     }
     temporary.as_file().sync_all()?;
     progress.check()?;
     temporary.persist(path)?;
-    step.finish(format!("{name}；{} 字节", data.len()));
+    step.finish(format!("{name}；{size} 字节"));
     Ok(())
 }
 
@@ -197,7 +212,10 @@ impl Store {
     pub fn changed(&self) -> Vec<PathBuf> {
         self.files
             .iter()
-            .filter(|(_, file)| file.current != file.original)
+            .filter(|(_, file)| {
+                file.current.matches(0, &file.original) != Some(true)
+                    || file.current.len() != file.original.len()
+            })
             .map(|(target, _)| target.clone())
             .collect()
     }
@@ -215,7 +233,7 @@ impl Store {
         Ok(changed
             .into_iter()
             .map(|target| {
-                let data = self.files[&target].original.as_ref().clone();
+                let data = Data::from(self.files[&target].original.clone());
                 (
                     target,
                     Content {
@@ -234,7 +252,7 @@ impl Store {
     ) -> Result<()> {
         for (target, content) in &contents {
             let file = &self.files[target];
-            if file.current.as_slice() != content.data
+            if file.current != content.data
                 && !file.confirmed
                 && let Some(issue) = &file.source_issue
             {
@@ -258,18 +276,51 @@ impl File {
     }
 
     fn open(target: &Path, backup: PathBuf, progress: &Progress) -> Result<Self> {
-        let current = Arc::new(read(target, progress, "载入文件")?);
         let mut source_issue = None;
-        let original = if backup.try_exists()? {
-            Arc::new(read(&backup, progress, "载入文件")?)
+        let (original, current) = if backup.try_exists()? {
+            let original = Arc::new(read(&backup, progress, "载入文件")?);
+            let mut file = fs::File::open(target)?;
+            let mut current = Data::default();
+            let mut buffer = vec![0; 1024 * 1024];
+            let mut changed = Vec::new();
+            let mut offset = 0;
+            loop {
+                progress.check()?;
+                let count = file.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                for bytes in buffer[..count].chunks(4096) {
+                    let end = offset + bytes.len();
+                    if original.get(offset..end) == Some(bytes) {
+                        if !changed.is_empty() {
+                            let size = changed.len();
+                            current.push(Arc::new(std::mem::take(&mut changed)), 0..size);
+                        }
+                        current.push(original.clone(), offset..end);
+                    } else {
+                        changed.extend_from_slice(bytes);
+                    }
+                    offset = end;
+                }
+            }
+            let size = changed.len();
+            current.push(Arc::new(changed), 0..size);
+            progress.record(
+                "载入文件",
+                &target.file_name().unwrap_or_default().to_string_lossy(),
+            );
+            (original, current)
         } else {
+            let original = Arc::new(read(target, progress, "载入文件")?);
             let step = progress.activity("检查文件改动");
             step.detail(display(target));
             source_issue = signature(target)
                 .err()
                 .map(|error| format!("{} 缺少原版备份，{error}", display(target)));
             step.finish(source_issue.as_deref().unwrap_or("未发现改动"));
-            current.clone()
+            let current = Data::from(original.clone());
+            (original, current)
         };
         Ok(Self {
             target: target.to_owned(),
@@ -284,19 +335,46 @@ impl File {
     }
 
     fn save(&mut self, content: Content, progress: &Progress) -> Result<()> {
-        if self.current.as_slice() == content.data {
+        if self.current == content.data {
             return Ok(());
         }
-        if read(&self.target, progress, "读取当前文件")?.as_slice() != self.current.as_slice()
-        {
+        let mut file = fs::File::open(&self.target)?;
+        let mut buffer = vec![0; 1024 * 1024];
+        let mut offset = 0;
+        let unchanged = loop {
+            progress.check()?;
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break offset == self.current.len();
+            }
+            if self.current.matches(offset, &buffer[..count]) != Some(true) {
+                break false;
+            }
+            offset += count;
+        };
+        drop(file);
+        progress.record(
+            "读取当前文件",
+            &self
+                .target
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
+        );
+        if !unchanged {
             return Err(format!("读取后目标文件发生了变化：{}", display(&self.target)).into());
         }
         if !self.backup.try_exists()? {
             fs::create_dir_all(self.backup.parent().ok_or("备份文件缺少父目录")?)?;
             write(&self.backup, &self.original, progress)?;
         }
-        write(&self.target, &content.data, progress)?;
-        self.current = Arc::new(content.data);
+        write_parts(
+            &self.target,
+            content.data.len(),
+            content.data.chunks(),
+            progress,
+        )?;
+        self.current = content.data;
         self.enabled = content.enabled;
         self.issue = None;
         self.source_issue = None;
