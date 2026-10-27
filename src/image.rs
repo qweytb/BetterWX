@@ -87,34 +87,37 @@ pub struct References {
 }
 
 struct Callers {
-    first: usize,
-    last: usize,
+    first: u32,
+    last: u32,
 }
 
 struct Reference {
-    function: usize,
-    next: Option<NonZero<usize>>,
+    function: u32,
+    next: Option<NonZero<u32>>,
 }
 
 impl References {
     pub fn get(&self, address: u64) -> Option<impl Iterator<Item = &Range<u64>>> {
         self.targets.get(&address).map(|callers| {
-            std::iter::successors(Some(callers.first), |index| {
-                self.entries[*index].next.map(|next| next.get() - 1)
+            std::iter::successors(Some(callers.first as usize), |index| {
+                self.entries[*index]
+                    .next
+                    .map(|next| next.get() as usize - 1)
             })
-            .map(|index| &self.functions[self.entries[index].function])
+            .map(|index| &self.functions[self.entries[index].function as usize])
         })
     }
 
     fn insert(&mut self, address: u64, function: usize) {
-        let index = self.entries.len();
+        let index = u32::try_from(self.entries.len()).expect("reference index overflow");
+        let function = u32::try_from(function).expect("function index overflow");
         match self.targets.entry(address) {
             Entry::Occupied(mut entry) => {
                 let callers = entry.get_mut();
-                if self.entries[callers.last].function == function {
+                if self.entries[callers.last as usize].function == function {
                     return;
                 }
-                self.entries[callers.last].next = NonZero::new(index + 1);
+                self.entries[callers.last as usize].next = NonZero::new(index + 1);
                 callers.last = index;
             }
             Entry::Vacant(entry) => {
